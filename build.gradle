@@ -1,0 +1,82 @@
+plugins {
+    id 'com.android.application' version '8.13.2' apply false
+}
+
+// A clean clone uses Android's normal shared debug keystore. A local recovery key
+// can preserve an existing installation without putting key material in the repo.
+def signingSetting = { String name, String environmentName ->
+    providers.gradleProperty(name).orElse(providers.environmentVariable(environmentName)).orNull
+}
+def requestedKeystore = signingSetting('adtWatchKeystore', 'ADT_WATCH_KEYSTORE')
+def legacyKeystore = rootProject.file('.tools/keys/adt-probe.jks')
+def selectedKeystore = requestedKeystore != null ? rootProject.file(requestedKeystore)
+    : (legacyKeystore.isFile() ? legacyKeystore : null)
+def selectedStorePassword = 'android'
+def selectedKeyAlias = 'androiddebugkey'
+def selectedKeyPassword = 'android'
+if (requestedKeystore != null) {
+    if (!selectedKeystore.isFile()) {
+        throw new GradleException('The explicitly configured ADT Watch keystore does not exist.')
+    }
+    selectedStorePassword = signingSetting('adtWatchStorePassword', 'ADT_WATCH_STORE_PASSWORD')
+    selectedKeyAlias = signingSetting('adtWatchKeyAlias', 'ADT_WATCH_KEY_ALIAS')
+    selectedKeyPassword = signingSetting('adtWatchKeyPassword', 'ADT_WATCH_KEY_PASSWORD')
+    if (!selectedStorePassword || !selectedKeyAlias || !selectedKeyPassword) {
+        throw new GradleException('An explicit ADT Watch keystore requires store password, key alias and key password via private Gradle properties or ADT_WATCH_* environment variables.')
+    }
+}
+
+subprojects {
+    apply plugin: 'com.android.application'
+    android {
+        namespace 'dev.personal.adtprobe'
+        compileSdk 36
+        buildToolsVersion '36.0.0'
+        defaultConfig {
+            applicationId 'dev.personal.adtprobe'
+            minSdk 30
+            targetSdk 36
+            versionCode 17
+            versionName '0.17'
+        }
+        signingConfigs {
+            debug {
+                if (selectedKeystore != null) {
+                    storeFile selectedKeystore
+                    storePassword selectedStorePassword
+                    keyAlias selectedKeyAlias
+                    keyPassword selectedKeyPassword
+                }
+            }
+        }
+        sourceSets {
+            main {
+                manifest.srcFile 'AndroidManifest.xml'
+                java.srcDirs = ['src', rootProject.file('shared/src')]
+                res.srcDirs = ['res', rootProject.file('shared/res')]
+                // v0.9 hosts ADT's own configuration. Old personal shortcut assets stay out.
+                assets.srcDirs = []
+            }
+            test {
+                java.srcDirs = ['tests', rootProject.file('shared/tests')]
+            }
+        }
+        compileOptions {
+            sourceCompatibility JavaVersion.VERSION_17
+            targetCompatibility JavaVersion.VERSION_17
+        }
+        testOptions {
+            unitTests.includeAndroidResources = true
+            unitTests.all {
+                jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED',
+                    '--add-opens=java.base/java.util=ALL-UNNAMED'
+            }
+        }
+        lint { abortOnError true }
+    }
+    dependencies {
+        implementation 'com.google.android.gms:play-services-wearable:20.0.1'
+        testImplementation 'junit:junit:4.13.2'
+        testImplementation 'org.robolectric:robolectric:4.16.1'
+    }
+}

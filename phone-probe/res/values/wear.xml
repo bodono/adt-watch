@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Discovered by Google Play Services by resource name, not referenced from Java. -->
+    <string-array name="android_wear_capabilities" translatable="false" tools:ignore="UnusedResources">
+        <item>adt_probe_phone_v1</item>
+    </string-array>
+</resources>

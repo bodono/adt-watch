@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:name="android.hardware.type.watch" android:required="true" />
+    <application android:label="ADT Watch" android:theme="@android:style/Theme.Material.NoActionBar"
+        android:icon="@drawable/ic_house" android:roundIcon="@drawable/ic_house"
+        android:dataExtractionRules="@xml/data_extraction_rules" android:allowBackup="false" android:fullBackupContent="false" android:supportsRtl="true">
+        <meta-data android:name="com.google.android.wearable.standalone" android:value="false" />
+        <service android:name=".AlarmTileService" android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+            android:label="@string/alarm_tile_label" android:description="@string/alarm_tile_description"
+            android:icon="@drawable/ic_house">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data android:name="androidx.wear.tiles.PREVIEW" android:resource="@drawable/alarm_tile_preview" />
+        </service>
+        <service android:name=".WatchStateListener" android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:path="/adt-probe/v3/state/report" />
+            </intent-filter>
+        </service>
+        <activity android:name=".WatchActivity" android:exported="true" android:launchMode="singleTop" android:taskAffinity="dev.personal.adtprobe.watch">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

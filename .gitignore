@@ -1,0 +1,46 @@
+# Local toolchains, build products and machine configuration
+.tools/
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+__pycache__/
+*.pyc
+
+# Never commit credentials, private signing material or installed app packages
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.apk
+*.aab
+key.properties
+keystore.properties
+signing.properties
+private-backup/
+private-notes/
+
+# Personal device inspection and historical experiments are not public source
+inspection/
+legacy/
+phone-probe/assets/
+phone-probe/prepare_config.py
+wear/test_protocol.py
+/inspect_adt.py
+/inspect_phone_ui.py
+/observe_arm_experiment.py
+/snapshot_adt_notifications.py
+/RESUME.md
+/NEXT-SESSION.md
+/ARM-EXPERIMENT.md
+/SCENE-ROUTE.md
+/USING-ADT-WATCH.md
+/V17-CONTROLS.md
+/WATCH-PLAN.md
