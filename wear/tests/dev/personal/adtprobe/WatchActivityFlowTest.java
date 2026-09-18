@@ -3,6 +3,7 @@ package dev.personal.adtprobe;
 import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
@@ -206,6 +207,60 @@ public final class WatchActivityFlowTest {
         assertEquals(AlarmAction.DISARM, WatchAlarmStore.read(context).action);
     }
 
+    @Test public void successfulDisarmShowsCurrentRecoveryStatusAndNewReportEnablesArmWithoutSendingIt() {
+        report(AlarmStateProtocol.State.ARMED_STAY);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        String challenge = UUID.randomUUID().toString();
+        handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+            ArmExperimentProtocol.encodeChallenge(AlarmAction.DISARM, selected.request, challenge));
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH,
+            ArmExperimentProtocol.encodeResult(AlarmAction.DISARM, selected.request, challenge,
+                ArmExperimentProtocol.Outcome.REQUESTED));
+        stopQueryTransport();
+        assertNull(attempt());
+        assertFalse(controls().alarmButton.isEnabled());
+        assertNull("A fixed request message must not mask changing recovery details",
+            ReflectionHelpers.getField(activity, "feedback"));
+        assertTrue(controls().alarmButton.getText().toString().contains(WatchAlarmStore.read(context).detail));
+
+        advance(2_001);
+        report(AlarmStateProtocol.State.DISARMED);
+        render();
+        assertEquals(AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
+        assertTrue(controls().alarmButton.isEnabled());
+        assertEquals("Status recovery must neither repeat Disarm nor send Arm Stay", 2, sent.size());
+        assertEquals(1, commits());
+    }
+
+    @Test public void freshPhoneDiagnosisReplacesAnEarlierConnectionError() {
+        report(AlarmStateProtocol.State.ARMED_STAY);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        ReflectionHelpers.callInstanceMethod(activity, "endAttempt",
+            ClassParameter.from(String.class, "Phone unavailable. Tap Refresh."),
+            ClassParameter.from(boolean.class, false));
+        stopQueryTransport();
+        assertTrue(controls().alarmButton.getText().toString().contains("Phone unavailable"));
+
+        advance(2_001);
+        WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
+        assertNotNull(query);
+        assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
+        assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce,
+            AlarmStateProtocol.State.UNKNOWN, AlarmStateProtocol.Availability.NO_ACCESS, "-", 0), now(), BOOT));
+        SharedPreferences.OnSharedPreferenceChangeListener changed = ReflectionHelpers.getField(activity, "changed");
+        changed.onSharedPreferenceChanged(context.getSharedPreferences(WatchAlarmStore.PREFERENCES,
+            Context.MODE_PRIVATE), "contactReceived");
+        stopQueryTransport();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertTrue(controls().alarmButton.getText().toString().contains("Allow ADT status access"));
+        assertFalse(controls().alarmButton.isEnabled());
+        assertEquals(1, sent.size());
+        assertEquals(0, commits());
+    }
+
     private void mount(Intent intent, Bundle saved, boolean ready) {
         controller = Robolectric.buildActivity(WatchActivity.class, intent).create(saved).start().visible();
         activity = controller.get();
@@ -288,6 +343,8 @@ public final class WatchActivityFlowTest {
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "pending", null);
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "lastRefresh", -1L);
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "activeSelection", null);
+        ReflectionHelpers.setStaticField(WatchAlarmStore.class, "recovery", null);
+        ReflectionHelpers.setStaticField(WatchAlarmStore.class, "refreshQueued", false);
     }
 
     private void stopQueryTransport() {

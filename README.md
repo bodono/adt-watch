@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app already installed on a paired Android phone.
 It is not affiliated with or supported by ADT.
 
-v0.17 provides one large alarm button and a swipeable **ADT Watch** tile:
+v0.18 provides one large alarm button and a swipeable **ADT Watch** tile:
 
 | Colour | Latest ADT report | One tap requests |
 | --- | --- | --- |
@@ -27,6 +27,11 @@ does not change the colour; the app waits for a new ADT report. **Refresh** asks
 the phone for status without operating the alarm. If the result stays grey,
 check ADT before another request: queued ADT work can execute later.
 
+Opening the app or entering its Tile starts up to 30 seconds of read-only
+status recovery. Failed or incomplete status checks are retried within that
+period; alarm commands are never retried. A missing ADT report keeps controls
+grey, even if the phone itself is reachable.
+
 ## Setup and recovery
 
 The phone app, **ADT Watch Setup**, hosts two native ADT scene widgets and records
@@ -46,8 +51,10 @@ and versions are rejected. The Wear APK has minimum Android API 30.
 
 Both actions and their red/green Tile updates have worked on one personal Pixel
 phone/watch setup with the phone locked and ADT set to Unrestricted. They take a
-few seconds. Natural overnight idle and wider device/account compatibility are
-not established. Offline tests use simulated widgets and do not contact ADT.
+few seconds. Overnight use of v0.17 exposed missed status updates and grey
+controls after successful disarming. v0.18 adds bounded status recovery;
+reliable overnight operation and wider device/account compatibility still need
+physical verification. Offline tests use simulated widgets and do not contact ADT.
 
 ## Source and signing
 

@@ -34,6 +34,7 @@ public final class WatchActivity extends Activity {
     private final SharedPreferences.OnSharedPreferenceChangeListener changed = (prefs, key) -> handler.post(() -> {
         if (attempt != null && !commandSent && !WatchAlarmStore.stillCurrent(this, selection))
             endAttempt("Status changed. Please check the new state.", false);
+        if ("contactReceived".equals(key) && prefs.contains(key)) feedback = null;
         if (attempt == null && WatchAlarmStore.read(this).enabled) feedback = null;
         render();
     });
@@ -125,8 +126,7 @@ public final class WatchActivity extends Activity {
         } else if (ArmExperimentProtocol.RESULT_PATH.equals(event.getPath())
                 && started.acceptResult(event.getData(), event.getSourceNodeId(), now)) {
             boolean requested = started.outcome() == ArmExperimentProtocol.Outcome.REQUESTED;
-            endAttempt(requested ? "Waiting for ADT…" : "Request declined. Refreshing…", requested);
-            WatchAlarmStore.refresh(this);
+            endAttempt(requested ? null : "Request declined. Refreshing…", requested);
         }
     }
     private void send(String node, String path, byte[] payload, Runnable failure) {
@@ -135,7 +135,10 @@ public final class WatchActivity extends Activity {
     private void endAttempt(String message, boolean mayHaveSent) {
         if (attempt != null) attempt.cancel();
         attempt = null; selection = null; commandSent = false;
-        feedback = message; WatchAlarmStore.finish(this, mayHaveSent); render();
+        // Once a command may have been sent, show the store's current recovery status.
+        // A fixed "Waiting for ADT" message would hide later phone/notification failures.
+        feedback = mayHaveSent ? null : message;
+        WatchAlarmStore.finish(this, mayHaveSent); render();
     }
     private void render() {
         if (controls == null) return;

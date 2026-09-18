@@ -13,17 +13,47 @@ import com.google.android.gms.wearable.Node;
 import com.google.android.gms.wearable.Wearable;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /** Reported ADT state only: this class has no alarm-command transport. */
 final class WatchAlarmStore {
     static final String PREFERENCES = "watch_alarm_state";
     private static final long QUERY_MS = 10_000;
     private static final long THROTTLE_MS = 2_000;
+    private static final long RECOVERY_MS = 30_000;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static Query pending;
     private static long lastRefresh = -1;
     private static boolean refreshQueued;
     private static Selection activeSelection;
+    private static Recovery recovery;
+
+    /** Status transport cannot carry an alarm command. Replaced with inert callbacks in tests. */
+    interface StatusTransport {
+        void discover(Context context, Consumer<String> found, Runnable failed);
+        void query(Context context, String phone, String nonce, Runnable failed);
+    }
+    private static StatusTransport transport = new StatusTransport() {
+        @Override public void discover(Context context, Consumer<String> found, Runnable failed) {
+            Wearable.getCapabilityClient(context).getCapability(WatchProtocol.PHONE_CAPABILITY,
+                    CapabilityClient.FILTER_REACHABLE).addOnCompleteListener(task -> {
+                if (!task.isSuccessful() || task.getResult() == null) { failed.run(); return; }
+                Set<Node> nodes = task.getResult().getNodes();
+                if (nodes == null || nodes.size() != 1) { failed.run(); return; }
+                found.accept(nodes.iterator().next().getId());
+            });
+        }
+        @Override public void query(Context context, String phone, String nonce, Runnable failed) {
+            Wearable.getMessageClient(context).sendMessage(phone, AlarmStateProtocol.QUERY_PATH,
+                    AlarmStateProtocol.query(nonce)).addOnFailureListener(error -> failed.run());
+        }
+    };
+
+    private static final class Recovery {
+        final long started;
+        Recovery(long started) { this.started = started; }
+        boolean live(long now) { return now >= started && now - started < RECOVERY_MS; }
+    }
 
     static final class ViewState {
         final String label, detail, revision;
@@ -47,8 +77,9 @@ final class WatchAlarmStore {
     static final class Query {
         final String nonce = UUID.randomUUID().toString();
         final long started;
+        final Recovery owner;
         String phone;
-        Query(long started) { this.started = started; }
+        Query(long started) { this.started = started; owner = recovery; }
         boolean live(long now) { return now >= started && now - started < QUERY_MS; }
     }
 
@@ -62,10 +93,10 @@ final class WatchAlarmStore {
         SharedPreferences p = prefs(context);
         recoverPossibleSend(p);
         if (p.getBoolean("busy", false)) return neutral("Checking alarm", p.getBoolean("awaiting", false)
-                ? "Waiting for a new ADT update" : "Request in progress");
-        if (!trusted(p, boot) || !fresh(p, now)) return neutral("State unknown", "Tap Refresh to contact your phone");
+                ? statusDetail(p, now, boot, true) : "Request in progress");
         AlarmStateProtocol.Availability availability = availability(p);
-        if (availability != AlarmStateProtocol.Availability.READY) return neutral("State unknown", detail(availability));
+        if (!trusted(p, boot) || !fresh(p, now) || availability != AlarmStateProtocol.Availability.READY)
+            return neutral("State unknown", statusDetail(p, now, boot, false));
         long age = age(p, now);
         AlarmStateProtocol.State state = state(p);
         AlarmAction action = AlarmStateProtocol.action(state);
@@ -86,39 +117,73 @@ final class WatchAlarmStore {
 
     static void refresh(Context context) {
         Context app = context.getApplicationContext();
-        MAIN.post(() -> startRefresh(app));
+        MAIN.post(() -> startRecovery(app));
     }
 
-    private static void startRefresh(Context app) {
-            Query query = beginQuery(SystemClock.elapsedRealtime());
-            if (query == null) {
-                synchronized (WatchAlarmStore.class) {
-                    long now = SystemClock.elapsedRealtime();
-                    if (pending != null && pending.live(now) || refreshQueued) return;
-                    refreshQueued = true;
-                    long delay = lastRefresh >= 0 && now >= lastRefresh ? Math.max(1, THROTTLE_MS - (now - lastRefresh)) : 1;
-                    MAIN.postDelayed(() -> {
-                        synchronized (WatchAlarmStore.class) { refreshQueued = false; }
-                        startRefresh(app);
-                    }, delay);
-                }
-                return;
+    private static synchronized void startRecovery(Context app) {
+        if (activeSelection != null) return;
+        long now = SystemClock.elapsedRealtime();
+        if (recovery != null && recovery.live(now)) return;
+        cancelRecovery();
+        Recovery started = new Recovery(now);
+        recovery = started;
+        MAIN.postDelayed(() -> expireRecovery(app, started), RECOVERY_MS);
+        changed(app);
+        startRefresh(app, started);
+    }
+
+    private static synchronized void startRefresh(Context app, Recovery expected) {
+        long now = SystemClock.elapsedRealtime();
+        if (recovery != expected || !expected.live(now) || activeSelection != null) return;
+        Query query = beginQuery(now);
+        if (query == null) {
+            long delay = pending != null && pending.live(now) ? QUERY_MS - (now - pending.started)
+                    : lastRefresh >= 0 && now >= lastRefresh ? THROTTLE_MS - (now - lastRefresh) : 1;
+            scheduleRefresh(app, expected, Math.max(1, delay));
+            return;
+        }
+        MAIN.postDelayed(() -> failQuery(app, query), QUERY_MS);
+        try {
+            transport.discover(app, phone -> MAIN.post(() -> {
+                if (!selectSource(app, query, phone, SystemClock.elapsedRealtime(), boot(app))) return;
+                try { transport.query(app, phone, query.nonce, () -> MAIN.post(() -> failQuery(app, query))); }
+                catch (RuntimeException error) { failQuery(app, query); }
+            }), () -> MAIN.post(() -> failQuery(app, query)));
+        } catch (RuntimeException error) { failQuery(app, query); }
+    }
+
+    private static synchronized void scheduleRefresh(Context app, Recovery expected, long delay) {
+        if (expected == null || recovery != expected || !expected.live(SystemClock.elapsedRealtime()) || refreshQueued) return;
+        refreshQueued = true;
+        MAIN.postDelayed(() -> {
+            synchronized (WatchAlarmStore.class) {
+                if (recovery != expected) return;
+                refreshQueued = false;
+                startRefresh(app, expected);
             }
-            MAIN.postDelayed(() -> failQuery(app, query), QUERY_MS);
-            try {
-                Wearable.getCapabilityClient(app).getCapability(WatchProtocol.PHONE_CAPABILITY,
-                        CapabilityClient.FILTER_REACHABLE).addOnCompleteListener(task -> {
-                    if (!task.isSuccessful() || task.getResult() == null) { failQuery(app, query); return; }
-                    Set<Node> nodes = task.getResult().getNodes();
-                    if (nodes == null || nodes.size() != 1) { failQuery(app, query); return; }
-                    String phone = nodes.iterator().next().getId();
-                    if (!selectSource(app, query, phone, SystemClock.elapsedRealtime(), boot(app))) return;
-                    try {
-                        Wearable.getMessageClient(app).sendMessage(phone, AlarmStateProtocol.QUERY_PATH,
-                                AlarmStateProtocol.query(query.nonce)).addOnFailureListener(error -> failQuery(app, query));
-                    } catch (RuntimeException error) { failQuery(app, query); }
-                });
-            } catch (RuntimeException error) { failQuery(app, query); }
+        }, delay);
+    }
+
+    private static synchronized void expireRecovery(Context context, Recovery expected) {
+        if (recovery != expected) return;
+        if (pending != null && pending.owner == expected) markTransportFailed(context);
+        cancelRecovery();
+        changed(context);
+    }
+
+    private static void cancelRecovery() {
+        recovery = null;
+        pending = null;
+        refreshQueued = false;
+    }
+
+    private static void afterAnswer(Context context) {
+        if (recovery == null) return;
+        AlarmStateProtocol.Availability status = availability(prefs(context));
+        if (read(context).enabled || status == AlarmStateProtocol.Availability.NO_ACCESS
+                || status == AlarmStateProtocol.Availability.SETUP || status == AlarmStateProtocol.Availability.STALE) {
+            cancelRecovery();
+        } else scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
     }
 
     static synchronized Query beginQuery(long now) {
@@ -130,14 +195,14 @@ final class WatchAlarmStore {
     }
 
     static synchronized boolean selectSource(Context context, Query query, String source, long now, int boot) {
-        if (pending != query || !query.live(now) || !WatchProtocol.validNodeId(source) || boot < 0) return false;
+        if (!queryCurrent(query, now) || !WatchProtocol.validNodeId(source) || boot < 0) return false;
         query.phone = source;
         SharedPreferences p = prefs(context);
         if (!trusted(p, boot) || !source.equals(p.getString("source", ""))) {
             // Switching source or rebooting removes actionable cache, never a possible-send latch.
             p.edit().putString("source", source).putInt("boot", boot)
                     .remove("token").remove("tokenIssued").remove("revision").remove("seen")
-                    .remove("received").remove("age").remove("state")
+                    .remove("received").remove("age").remove("state").remove("contactReceived")
                     .putString("availability", AlarmStateProtocol.Availability.OFFLINE.name()).apply();
             changed(context);
         }
@@ -171,9 +236,10 @@ final class WatchAlarmStore {
                     ? AlarmStateProtocol.Availability.OFFLINE : report.availability).name())
                     .remove("token").remove("tokenIssued").apply();
             changed(context);
+            scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
             return true;
         }
-        if (answer && (pending == null || !pending.live(now) || !source.equals(pending.phone)
+        if (answer && (pending == null || !queryCurrent(pending, now) || !source.equals(pending.phone)
                 || !report.request.equals(pending.nonce))) return false;
 
         String oldRevision = p.getString("revision", "");
@@ -191,13 +257,16 @@ final class WatchAlarmStore {
                     && now >= previousReceived && report.ageMillis > age(p, now)) return false;
             if (same && report.ageMillis == previousAge && report.availability == availability(p)) {
                 if (answer) pending = null;
-                return false; // A duplicate must not keep either the link or the report fresh forever.
+                p.edit().putLong("contactReceived", now).apply();
+                afterAnswer(context);
+                changed(context);
+                return false; // Contact alone must not keep the actionable report fresh forever.
             }
         }
         if (answer) pending = null;
         SharedPreferences.Editor edit = p.edit();
         boolean wasFresh = fresh(p, now);
-        edit.putString("availability", report.availability.name());
+        edit.putString("availability", report.availability.name()).putLong("contactReceived", now);
         if (ready) {
             edit.putString("revision", report.revision).putString("state", report.state.name());
             if (!same || report.ageMillis > previousAge) {
@@ -217,6 +286,7 @@ final class WatchAlarmStore {
             edit.remove("token").remove("tokenIssued");
         }
         edit.apply();
+        afterAnswer(context);
         changed(context);
         return true;
     }
@@ -244,6 +314,7 @@ final class WatchAlarmStore {
         if (!AlarmStateProtocol.uuid(token) || action == null) return null;
         ViewState view = readAt(context, now, boot);
         if (!view.enabled || view.action != action || !token.equals(view.revision)) return null;
+        cancelRecovery();
         SharedPreferences p = prefs(context);
         Selection selected = new Selection(p.getString("source", ""), p.getString("revision", ""), action);
         activeSelection = selected;
@@ -270,6 +341,7 @@ final class WatchAlarmStore {
                 .remove("token").remove("tokenIssued").apply();
         activeSelection = null;
         changed(context);
+        refresh(context);
     }
 
     private static void recoverPossibleSend(SharedPreferences p) {
@@ -293,9 +365,19 @@ final class WatchAlarmStore {
     private static synchronized void failQuery(Context context, Query query) {
         if (pending != query) return;
         pending = null;
-        prefs(context).edit().putString("availability", AlarmStateProtocol.Availability.OFFLINE.name())
-                .remove("token").remove("tokenIssued").apply();
+        markTransportFailed(context);
+        scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
         changed(context);
+    }
+
+    private static void markTransportFailed(Context context) {
+        prefs(context).edit().putString("availability", AlarmStateProtocol.Availability.OFFLINE.name())
+                .remove("token").remove("tokenIssued").remove("contactReceived").apply();
+    }
+
+    private static boolean queryCurrent(Query query, long now) {
+        return pending == query && query.live(now) && (query.owner == null
+                || recovery == query.owner && query.owner.live(now));
     }
 
     private static SharedPreferences prefs(Context context) { return context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE); }
@@ -330,11 +412,23 @@ final class WatchAlarmStore {
         switch (state) {
             case NO_ACCESS: return "Allow ADT status access on your phone";
             case SETUP: return "Finish alarm setup on your phone";
-            case BUSY: return "Waiting for your phone";
+            case BUSY: return "Phone reached; waiting for ADT";
             case STALE: return "An up-to-date ADT report is needed";
-            case NO_STATE: return "Waiting for an ADT state report";
+            case NO_STATE: return "Phone reached; no ADT report";
+            case OFFLINE: return "Phone reached; ADT status unavailable";
             default: return "Tap Refresh to contact your phone";
         }
+    }
+    private static String statusDetail(SharedPreferences p, long now, int boot, boolean awaiting) {
+        long contact = p.getLong("contactReceived", -1);
+        if (trusted(p, boot) && contact >= 0 && now >= contact && now - contact < AlarmStateProtocol.LINK_FRESH_MS) {
+            AlarmStateProtocol.Availability status = availability(p);
+            if (status != AlarmStateProtocol.Availability.READY) return detail(status);
+            if (awaiting) return "Waiting for a new ADT update";
+            return "An up-to-date ADT report is needed";
+        }
+        if (recovery != null && recovery.live(now)) return "Connecting to phone…";
+        return awaiting ? "No phone reply; check ADT" : "No phone reply. Tap Refresh";
     }
     private static void changed(Context context) {
         // Tile renderer availability cannot undo a safely saved state or consumed token.

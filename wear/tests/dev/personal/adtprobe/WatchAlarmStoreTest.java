@@ -1,10 +1,12 @@
 package dev.personal.adtprobe;
 
 import android.content.Context;
+import android.os.Handler;
 import android.os.SystemClock;
 import android.provider.Settings;
 import java.time.Duration;
 import org.junit.Before;
+import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -26,6 +28,7 @@ public final class WatchAlarmStoreTest {
     private Context context;
 
     @Before public void setUp() {
+        stopRecovery();
         context = RuntimeEnvironment.getApplication();
         Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, BOOT);
         context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE).edit().clear().commit();
@@ -33,6 +36,11 @@ public final class WatchAlarmStoreTest {
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "lastRefresh", -1L);
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "refreshQueued", false);
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "activeSelection", null);
+    }
+
+    @After public void stopRecovery() {
+        ((Handler) ReflectionHelpers.getStaticField(WatchAlarmStore.class, "MAIN")).removeCallbacksAndMessages(null);
+        ReflectionHelpers.setStaticField(WatchAlarmStore.class, "recovery", null);
     }
 
     @Test public void sourceAndLiveQueryNonceAreRequired() {

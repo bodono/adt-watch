@@ -52,6 +52,18 @@ unsupported, disconnected, stale or pending state becomes grey. Reports older
 than 24 hours and watch caches without recent phone contact cannot authorize a
 coloured control.
 
+App/Tile entry, an explicit refresh, an incoming update or a completed request
+starts a bounded 30-second status recovery period. Failed queries and transient
+phone reports can retry after two seconds, with one query at a time. Starting
+an alarm action cancels status recovery so a retry cannot interfere with the
+action handshake. Finishing that attempt resumes status checks, including when
+the command outcome is uncertain. No retry carries an alarm command.
+
+A correlated response records phone contact separately from actionable state
+freshness. A reachable phone with a disconnected notification listener is
+therefore distinguishable from a phone that did not answer. Neither contact
+alone nor an unsolicited update clears a pending alarm action.
+
 Before native execution, the phone consumes the displayed state revision and
 records a pending result. A newer ADT state report is required to clear it.
 Neither a successful message send nor a widget invocation invents the opposite
@@ -63,4 +75,6 @@ Pure and Robolectric tests cover protocols, inert widgets, lifecycle handling,
 setup revocation, actual native view input and round-screen layout. They never
 contact ADT or a physical device. One personal locked-phone Tile cycle has been
 verified for both actions with ADT battery usage Unrestricted. Wider
-compatibility and natural overnight idle are not established.
+compatibility and reliable overnight operation are not established. v0.17
+overnight use exposed missed confirmation recovery; v0.18 addresses the
+one-shot status-query failure path but still requires physical validation.
