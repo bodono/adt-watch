@@ -20,11 +20,15 @@ final class WatchAlarmStore {
     static final String PREFERENCES = "watch_alarm_state";
     private static final long QUERY_MS = 10_000;
     private static final long THROTTLE_MS = 2_000;
+    private static final long HINT_THROTTLE_MS = 250;
     private static final long RECOVERY_MS = 30_000;
+    private static final long PASSIVE_FRESH_MS = 45_000;
+    private static final long PASSIVE_COOLDOWN_MS = 60_000;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static Query pending;
     private static long lastRefresh = -1;
     private static boolean refreshQueued;
+    private static ScheduledRefresh scheduledRefresh;
     private static Selection activeSelection;
     private static Recovery recovery;
 
@@ -51,8 +55,16 @@ final class WatchAlarmStore {
 
     private static final class Recovery {
         final long started;
+        boolean tilePreviewed;
+        boolean hinted;
         Recovery(long started) { this.started = started; }
         boolean live(long now) { return now >= started && now - started < RECOVERY_MS; }
+    }
+
+    private static final class ScheduledRefresh {
+        final Recovery owner;
+        final long at;
+        ScheduledRefresh(Recovery owner, long at) { this.owner = owner; this.at = at; }
     }
 
     static final class ViewState {
@@ -120,13 +132,50 @@ final class WatchAlarmStore {
         MAIN.post(() -> startRecovery(app));
     }
 
+    /** Called on the main thread by visible UI; rendering cannot create a recovery loop. */
+    static synchronized boolean refreshIfNeeded(Context context) {
+        if (activeSelection != null) return false;
+        if (isRefreshing()) return true;
+        long now = SystemClock.elapsedRealtime();
+        int boot = boot(context);
+        SharedPreferences p = prefs(context);
+        ViewState current = readAt(context, now, boot);
+        long received = p.getLong("received", -1);
+        if (current.enabled && received >= 0 && now >= received && now - received < PASSIVE_FRESH_MS) return false;
+        long started = p.getLong("passiveRecoveryStarted", -1);
+        if (p.getInt("passiveRecoveryBoot", -1) == boot && started >= 0
+                && (now < started || now - started < PASSIVE_COOLDOWN_MS)) return false;
+        startRecovery(context.getApplicationContext());
+        return isRefreshing();
+    }
+
+    static synchronized boolean isRefreshing() {
+        return recovery != null && recovery.live(SystemClock.elapsedRealtime());
+    }
+
+    /** One immediate loading frame per recovery; later tile requests can await its result. */
+    static synchronized boolean claimTilePreview() {
+        if (!isRefreshing() || recovery.tilePreviewed) return false;
+        recovery.tilePreviewed = true;
+        return true;
+    }
+
     private static synchronized void startRecovery(Context app) {
+        startRecovery(app, false);
+    }
+
+    private static synchronized void startRecovery(Context app, boolean hint) {
         if (activeSelection != null) return;
         long now = SystemClock.elapsedRealtime();
-        if (recovery != null && recovery.live(now)) return;
+        if (recovery != null && recovery.live(now)) {
+            if (hint) expediteRefresh(app, recovery, now);
+            return;
+        }
         cancelRecovery();
         Recovery started = new Recovery(now);
+        started.hinted = hint;
         recovery = started;
+        prefs(app).edit().putLong("passiveRecoveryStarted", now).putInt("passiveRecoveryBoot", boot(app)).apply();
         MAIN.postDelayed(() -> expireRecovery(app, started), RECOVERY_MS);
         changed(app);
         startRefresh(app, started);
@@ -135,13 +184,15 @@ final class WatchAlarmStore {
     private static synchronized void startRefresh(Context app, Recovery expected) {
         long now = SystemClock.elapsedRealtime();
         if (recovery != expected || !expected.live(now) || activeSelection != null) return;
-        Query query = beginQuery(now);
+        long minimumInterval = expected.hinted ? HINT_THROTTLE_MS : THROTTLE_MS;
+        Query query = beginQuery(now, minimumInterval);
         if (query == null) {
             long delay = pending != null && pending.live(now) ? QUERY_MS - (now - pending.started)
-                    : lastRefresh >= 0 && now >= lastRefresh ? THROTTLE_MS - (now - lastRefresh) : 1;
+                    : lastRefresh >= 0 && now >= lastRefresh ? minimumInterval - (now - lastRefresh) : 1;
             scheduleRefresh(app, expected, Math.max(1, delay));
             return;
         }
+        expected.hinted = false;
         MAIN.postDelayed(() -> failQuery(app, query), QUERY_MS);
         try {
             transport.discover(app, phone -> MAIN.post(() -> {
@@ -153,15 +204,27 @@ final class WatchAlarmStore {
     }
 
     private static synchronized void scheduleRefresh(Context app, Recovery expected, long delay) {
-        if (expected == null || recovery != expected || !expected.live(SystemClock.elapsedRealtime()) || refreshQueued) return;
+        long now = SystemClock.elapsedRealtime();
+        if (expected == null || recovery != expected || !expected.live(now)) return;
+        long at = now + Math.max(0, delay);
+        if (refreshQueued && scheduledRefresh != null && scheduledRefresh.owner == expected && scheduledRefresh.at <= at) return;
+        ScheduledRefresh scheduled = new ScheduledRefresh(expected, at);
+        scheduledRefresh = scheduled;
         refreshQueued = true;
         MAIN.postDelayed(() -> {
             synchronized (WatchAlarmStore.class) {
-                if (recovery != expected) return;
+                if (recovery != expected || scheduledRefresh != scheduled) return;
                 refreshQueued = false;
+                scheduledRefresh = null;
                 startRefresh(app, expected);
             }
-        }, delay);
+        }, Math.max(0, delay));
+    }
+
+    private static void expediteRefresh(Context app, Recovery expected, long now) {
+        expected.hinted = true;
+        long delay = lastRefresh >= 0 && now >= lastRefresh ? Math.max(0, HINT_THROTTLE_MS - (now - lastRefresh)) : 0;
+        scheduleRefresh(app, expected, delay);
     }
 
     private static synchronized void expireRecovery(Context context, Recovery expected) {
@@ -175,20 +238,27 @@ final class WatchAlarmStore {
         recovery = null;
         pending = null;
         refreshQueued = false;
+        scheduledRefresh = null;
     }
 
     private static void afterAnswer(Context context) {
+        boolean actionable = read(context).enabled;
+        if (actionable) prefs(context).edit().remove("passiveRecoveryStarted").remove("passiveRecoveryBoot").apply();
         if (recovery == null) return;
         AlarmStateProtocol.Availability status = availability(prefs(context));
-        if (read(context).enabled || status == AlarmStateProtocol.Availability.NO_ACCESS
+        if (actionable || status == AlarmStateProtocol.Availability.NO_ACCESS
                 || status == AlarmStateProtocol.Availability.SETUP || status == AlarmStateProtocol.Availability.STALE) {
             cancelRecovery();
         } else scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
     }
 
     static synchronized Query beginQuery(long now) {
+        return beginQuery(now, THROTTLE_MS);
+    }
+
+    private static Query beginQuery(long now, long minimumInterval) {
         if (pending != null && pending.live(now)) return null;
-        if (lastRefresh >= 0 && now >= lastRefresh && now - lastRefresh < THROTTLE_MS) return null;
+        if (lastRefresh >= 0 && now >= lastRefresh && now - lastRefresh < minimumInterval) return null;
         lastRefresh = now;
         pending = new Query(now);
         return pending;
@@ -217,7 +287,7 @@ final class WatchAlarmStore {
         Context app = context.getApplicationContext();
         MAIN.post(() -> {
             if (accept(app, source, report, SystemClock.elapsedRealtime(), boot(app)) && "-".equals(report.request))
-                refresh(app);
+                startRecovery(app, true);
         });
     }
 
@@ -236,7 +306,7 @@ final class WatchAlarmStore {
                     ? AlarmStateProtocol.Availability.OFFLINE : report.availability).name())
                     .remove("token").remove("tokenIssued").apply();
             changed(context);
-            scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
+            if (recovery != null && recovery.live(now)) expediteRefresh(context.getApplicationContext(), recovery, now);
             return true;
         }
         if (answer && (pending == null || !queryCurrent(pending, now) || !source.equals(pending.phone)

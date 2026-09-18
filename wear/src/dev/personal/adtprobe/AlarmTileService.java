@@ -2,6 +2,9 @@ package dev.personal.adtprobe;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import androidx.concurrent.futures.CallbackToFutureAdapter;
 import androidx.wear.protolayout.ActionBuilders;
 import androidx.wear.protolayout.ColorBuilders;
@@ -18,6 +21,8 @@ import androidx.wear.tiles.TileBuilders;
 import androidx.wear.tiles.TileService;
 import com.google.common.util.concurrent.ListenableFuture;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.function.Supplier;
 
 /**
  * Passive alarm display and a native one-tap launch into the watch activity.
@@ -38,6 +43,11 @@ public final class AlarmTileService extends TileService {
     private static final int ARM_GREEN = 0xff237a45;
     private static final int DISARM_RED = 0xffb3261e;
     private static final int UNKNOWN_GREY = 0xff42464d;
+    // TileService futures must finish within 10 seconds. This is a ceiling, not a delay:
+    // completed recovery renders on the next 100ms check.
+    private static final long STATUS_WAIT_MS = 8_000;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final List<RefreshWait<?>> waits = new ArrayList<>();
 
     /** Call after a stored state changes. Delivery and rendering are platform scheduled. */
     public static void requestUpdate(Context context) {
@@ -49,7 +59,7 @@ public final class AlarmTileService extends TileService {
         for (EventBuilders.TileInteractionEvent event : events) {
             if (event.getEventType() == EventBuilders.TileInteractionEvent.ENTER) {
                 WatchAlarmStore.refresh(this);
-                break;
+                return awaitRefresh(() -> null);
             }
         }
         return immediate(null);
@@ -63,6 +73,28 @@ public final class AlarmTileService extends TileService {
 
     @Override protected ListenableFuture<TileBuilders.Tile> onTileRequest(
             RequestBuilders.TileRequest request) {
+        // On modern Wear OS, ENTER events are batched and may arrive after the tile
+        // is visible. A renderer request must also fetch stale/missing status itself.
+        // The store coalesces requests and throttles failed bursts, including requests
+        // caused by our own requestUpdate notifications.
+        if (WatchAlarmStore.refreshIfNeeded(this)) {
+            if (WatchAlarmStore.claimTilePreview()) {
+                // Give the renderer visible content first. A follow-up request can hold
+                // the service while the phone answers, with this frame already on screen.
+                // The claim belongs to the recovery, not the service instance, so rebinding
+                // cannot create an endless sequence of preview/update requests.
+                Context app = getApplicationContext();
+                handler.postDelayed(() -> {
+                    if (WatchAlarmStore.isRefreshing()) requestUpdate(app);
+                }, 100);
+                return immediate(buildTile(request));
+            }
+            return awaitRefresh(() -> buildTile(request));
+        }
+        return immediate(buildTile(request));
+    }
+
+    private TileBuilders.Tile buildTile(RequestBuilders.TileRequest request) {
         WatchAlarmStore.ViewState state = WatchAlarmStore.read(this);
         int screenWidth = request.getDeviceConfiguration().getScreenWidthDp();
         int screenHeight = request.getDeviceConfiguration().getScreenHeightDp();
@@ -72,7 +104,8 @@ public final class AlarmTileService extends TileService {
         float textWidth = Math.max(120f, edge * 0.76f);
 
         AlarmAction action = actionable(state) ? state.action : null;
-        String buttonLabel = action == null ? "Refresh" : action.label();
+        String buttonLabel = action == null
+                ? WatchAlarmStore.isRefreshing() ? "Checking…" : "Refresh" : action.label();
         int color = action == AlarmAction.DISARM ? DISARM_RED
                 : action == AlarmAction.ARM_STAY ? ARM_GREEN : UNKNOWN_GREY;
         String label = state == null ? "State unknown" : safeText(state.label, "State unknown");
@@ -116,7 +149,50 @@ public final class AlarmTileService extends TileService {
                                 .setLayout(new LayoutElementBuilders.Layout.Builder().setRoot(root).build())
                                 .build()).build())
                 .build();
-        return immediate(tile);
+        return tile;
+    }
+
+    /** Keep the service request alive while an asynchronous phone query can answer. */
+    private <T> ListenableFuture<T> awaitRefresh(Supplier<T> result) {
+        return CallbackToFutureAdapter.getFuture(completer -> {
+            RefreshWait<T> wait = new RefreshWait<>(completer, result);
+            waits.add(wait);
+            completer.addCancellationListener(wait::cancel, handler::post);
+            handler.post(wait);
+            return "Read-only alarm status for tile";
+        });
+    }
+
+    private final class RefreshWait<T> implements Runnable {
+        private final CallbackToFutureAdapter.Completer<T> completer;
+        private final Supplier<T> result;
+        private final long deadline = SystemClock.elapsedRealtime() + STATUS_WAIT_MS;
+        private boolean finished;
+
+        RefreshWait(CallbackToFutureAdapter.Completer<T> completer, Supplier<T> result) {
+            this.completer = completer;
+            this.result = result;
+        }
+        @Override public void run() {
+            if (finished) return;
+            if (!WatchAlarmStore.isRefreshing() || SystemClock.elapsedRealtime() >= deadline) finish();
+            else handler.postDelayed(this, 100);
+        }
+        void finish() {
+            if (finished) return;
+            cancel();
+            completer.set(result.get());
+        }
+        void cancel() {
+            finished = true;
+            handler.removeCallbacks(this);
+            waits.remove(this);
+        }
+    }
+
+    @Override public void onDestroy() {
+        for (RefreshWait<?> wait : new ArrayList<>(waits)) wait.finish();
+        super.onDestroy();
     }
 
     @Override protected ListenableFuture<ResourceBuilders.Resources> onTileResourcesRequest(

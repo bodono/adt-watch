@@ -59,6 +59,16 @@ an alarm action cancels status recovery so a retry cannot interfere with the
 action handshake. Finishing that attempt resumes status checks, including when
 the command outcome is uncertain. No retry carries an alarm command.
 
+The Tile also starts a status check when Wear OS requests stale content, since
+modern entry events may be delayed. It returns a checking frame immediately,
+then requests one follow-up render that can await status for at most eight
+seconds. The preview belongs to the recovery period, so rebinding the Tile
+service cannot repeat it indefinitely. Failed passive recovery has a persisted
+60-second cooldown to prevent redraw loops. Visible app status refreshes near
+45 seconds, before its 60-second link freshness expires. Trusted update hints
+can advance a queued status query, rate-limited to one query per 250ms, while
+ordinary failures keep the two-second retry interval and 30-second deadline.
+
 A correlated response records phone contact separately from actionable state
 freshness. A reachable phone with a disconnected notification listener is
 therefore distinguishable from a phone that did not answer. Neither contact
@@ -78,3 +88,5 @@ verified for both actions with ADT battery usage Unrestricted. Wider
 compatibility and reliable overnight operation are not established. v0.17
 overnight use exposed missed confirmation recovery; v0.18 addresses the
 one-shot status-query failure path but still requires physical validation.
+Automatic swipe refresh in v0.19 was observed on the personal watch; prolonged
+idle and repeated real alarm cycles still need normal-use verification.

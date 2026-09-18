@@ -43,7 +43,9 @@ public final class WatchActivity extends Activity {
             if (!resumed) return;
             if (attempt != null && (!interactive() || !attempt.isActive(SystemClock.elapsedRealtime())))
                 endAttempt(commandSent ? "Check ADT for the result." : "Phone unavailable. Tap Refresh.", commandSent);
-            maybeTileTap(); render(); handler.postDelayed(this, 250);
+            maybeTileTap();
+            if (attempt == null && interactive()) WatchAlarmStore.refreshIfNeeded(WatchActivity.this);
+            render(); handler.postDelayed(this, 250);
         }
     };
     @Override public void onCreate(Bundle saved) {

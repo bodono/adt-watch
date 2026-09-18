@@ -1,6 +1,6 @@
 # ADT Watch Setup — phone module
 
-The v0.18 Android companion hosts two user-configured native UK ADT scene widgets
+The v0.19 Android companion hosts two user-configured native UK ADT scene widgets
 and handles requests from one explicitly approved watch. It uses the installed
 ADT app for alarm execution; it does not contain ADT credentials or a direct
 ADT service client.

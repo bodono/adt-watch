@@ -1,6 +1,6 @@
 # ADT Watch — Wear OS module
 
-v0.18 shows one large alarm button and an **ADT Watch** Tile. Red means ADT last
+v0.19 shows one large alarm button and an **ADT Watch** Tile. Red means ADT last
 reported Armed Stay/Away and offers **Disarm**; green means reported Disarmed and
 offers **Arm Stay**. Grey disables alarm actions when state is unknown, stale,
 unavailable or awaiting a new report. State age is shown.
@@ -17,12 +17,24 @@ alarm retries. **Refresh** reads phone status without operating the alarm; only
 a newer accepted ADT report can resolve a pending result. App/Tile entry and
 completed attempts start a read-only recovery period of up to 30 seconds,
 retrying failed or incomplete status checks without repeating the alarm action.
+Tile rendering also checks stale or missing status automatically, without
+depending on delayed Tile-entry events. Each recovery first returns a visible
+checking frame immediately, then requests one follow-up render. That follow-up
+can await recovery (checked every 100ms), with an 8-second ceiling below the
+platform's 10-second deadline. The checking frame remains visible while waiting.
+Passive starts have a 60-second cooldown after failure to prevent redraw loops;
+Refresh and entry events can still request a new bounded recovery period.
+While the app stays visible, it refreshes before the 60-second link cache expires.
+Trusted ADT state-change hints can advance a pending status retry, limited to
+one new query per 250ms; ordinary failure retries remain two seconds apart.
 
 The paired phone must remain powered, locked and connected with ADT signed in,
 one-time helper setup complete, and **ADT's battery usage set to Unrestricted**.
 Both actions and their Tile colour updates have worked on a personal setup with
 the phone locked. v0.17 overnight use exposed missed status recovery; v0.18
-addresses that code path, but overnight reliability still needs verification.
+added recovery and v0.19 improves automatic Tile refresh. Overnight reliability
+still needs verification. Wear OS schedules refreshes; entry callbacks are
+batched on modern watches and are not a guaranteed per-swipe trigger.
 
 The phone and watch APKs share application ID `dev.personal.adtprobe` and must
 use the same signer. Build both from the repository root using

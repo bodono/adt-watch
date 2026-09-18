@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide covers v0.18. It distinguishes rebuilding the apps from recreating
+This guide covers v0.19. It distinguishes rebuilding the apps from recreating
 their private setup on a phone and watch. The repository provides source;
 Android widget consent, watch association, ADT sign-in and notification access
 are completed by the owner on their devices.
@@ -83,7 +83,7 @@ adb -s WATCH_SELECTOR install -r build/watch-probe.apk
 `-r` updates an existing matching-signature installation while retaining its
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
-builds at the same version and signature for fresh installs. The v0.18 watch
+builds at the same version and signature for fresh installs. The v0.19 watch
 update is also compatible with an already configured v0.17 phone: its message
 protocol is unchanged, so the phone does not need reinstalling for this fix.
 
@@ -91,7 +91,7 @@ protocol is unchanged, so the phone does not need reinstalling for this fix.
 
 Routine watch control requires Android 15 or later and a secure phone screen
 lock. Install and sign into UK **ADT Smart Services** in the same Android user
-profile as the helper. v0.18 accepts package `com.adtuk.adtukalarm` with
+profile as the helper. v0.19 accepts package `com.adtuk.adtukalarm` with
 **versionCode 2307** only. Its widget and English notification formats are
 version-specific; an unsupported version needs a code/compatibility review.
 
@@ -165,12 +165,16 @@ report. Reports over 24 hours old are not offered as coloured controls.
 
 For swipe access, add **ADT Watch** using the watch's tile picker. A coloured
 Tile tap opens the app and continues the same action without a second tap.
+Loading a stale Tile automatically fetches status; normally you do not need to
+press Refresh first. Wear OS controls refresh scheduling, so every swipe cannot
+be guaranteed an immediate update. Grey **Checking…** means a read-only status
+check is underway; **Refresh** remains available if the phone cannot be reached.
 See [Google's tile instructions](https://support.google.com/googlepixelwatch/answer/12662644?hl=en-GB).
 The computer and USB cable are not required for daily use.
 
 Both directions of this Tile flow have worked with the phone locked and ADT
 set to Unrestricted, taking a few seconds. v0.17 overnight use exposed missed
-confirmation recovery. v0.18 retries status checks for up to 30 seconds, but
+confirmation recovery. v0.19 retries status checks for up to 30 seconds, but
 reliable overnight operation and broader compatibility remain unverified.
 
 ## Changes and troubleshooting
@@ -184,7 +188,7 @@ reliable overnight operation and broader compatibility remain unverified.
   Refresh only reads status. Reopening ADT Watch alone does not send an alarm
   command; opening native ADT may let previously queued work run.
 - **Disarm worked but Arm Stay remains grey:** the helper still needs an accepted
-  Disarmed report. v0.18 retries read-only status checks briefly and distinguishes
+  Disarmed report. v0.19 retries read-only status checks briefly and distinguishes
   no phone reply from missing ADT status. Refresh starts another bounded status
   check; it never resends Disarm or automatically arms the system.
 - **Changing either scene or widget:** first use **Watch control access… →
@@ -196,7 +200,7 @@ reliable overnight operation and broader compatibility remain unverified.
   native setup and explicit watch review. Do not copy widget IDs or access
   records between devices. ADT sign-in, ADT scenes and the signing key are
   separate recovery items.
-- **ADT update stops compatibility:** v0.18 deliberately rejects other version
+- **ADT update stops compatibility:** v0.19 deliberately rejects other version
   codes. Keep normal alarm operation available through ADT while the new widget
   and notification contract is reviewed; do not bypass the check as a recovery
   shortcut.
