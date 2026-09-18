@@ -5,6 +5,7 @@ import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.Log;
 import androidx.concurrent.futures.CallbackToFutureAdapter;
 import androidx.wear.protolayout.ActionBuilders;
 import androidx.wear.protolayout.ColorBuilders;
@@ -48,18 +49,29 @@ public final class AlarmTileService extends TileService {
     private static final long STATUS_WAIT_MS = 8_000;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<RefreshWait<?>> waits = new ArrayList<>();
+    interface UpdateSender { void request(Context context); }
+    private static UpdateSender updateSender = context -> TileService.getUpdater(
+            context.getApplicationContext()).requestUpdate(AlarmTileService.class);
 
     /** Call after a stored state changes. Delivery and rendering are platform scheduled. */
     public static void requestUpdate(Context context) {
-        TileService.getUpdater(context.getApplicationContext()).requestUpdate(AlarmTileService.class);
+        // Preserve the renderer's update allowance for useful results, rather than
+        // sending a separate progress frame ahead of the original request's answer.
+        if (WatchAlarmStore.isRefreshing()) {
+            trace("update deferred during recovery");
+            return;
+        }
+        trace("update requested");
+        updateSender.request(context);
     }
 
     @Override protected ListenableFuture<Void> onRecentInteractionEventsAsync(
             List<EventBuilders.TileInteractionEvent> events) {
         for (EventBuilders.TileInteractionEvent event : events) {
             if (event.getEventType() == EventBuilders.TileInteractionEvent.ENTER) {
-                WatchAlarmStore.refresh(this);
-                return awaitRefresh(() -> null);
+                trace("enter batch");
+                // A delayed ENTER batch must not start another query after READY.
+                return WatchAlarmStore.refreshIfNeeded(this) ? awaitRefresh(() -> null) : immediate(null);
             }
         }
         return immediate(null);
@@ -73,22 +85,14 @@ public final class AlarmTileService extends TileService {
 
     @Override protected ListenableFuture<TileBuilders.Tile> onTileRequest(
             RequestBuilders.TileRequest request) {
+        trace("renderer request");
         // On modern Wear OS, ENTER events are batched and may arrive after the tile
         // is visible. A renderer request must also fetch stale/missing status itself.
         // The store coalesces requests and throttles failed bursts, including requests
         // caused by our own requestUpdate notifications.
         if (WatchAlarmStore.refreshIfNeeded(this)) {
-            if (WatchAlarmStore.claimTilePreview()) {
-                // Give the renderer visible content first. A follow-up request can hold
-                // the service while the phone answers, with this frame already on screen.
-                // The claim belongs to the recovery, not the service instance, so rebinding
-                // cannot create an endless sequence of preview/update requests.
-                Context app = getApplicationContext();
-                handler.postDelayed(() -> {
-                    if (WatchAlarmStore.isRefreshing()) requestUpdate(app);
-                }, 100);
-                return immediate(buildTile(request));
-            }
+            // Return the useful state in this response. A separate immediate Checking
+            // frame followed by requestUpdate can be cached for many seconds by Wear OS.
             return awaitRefresh(() -> buildTile(request));
         }
         return immediate(buildTile(request));
@@ -96,6 +100,7 @@ public final class AlarmTileService extends TileService {
 
     private TileBuilders.Tile buildTile(RequestBuilders.TileRequest request) {
         WatchAlarmStore.ViewState state = WatchAlarmStore.read(this);
+        trace("render enabled=" + state.enabled + " refreshing=" + WatchAlarmStore.isRefreshing());
         int screenWidth = request.getDeviceConfiguration().getScreenWidthDp();
         int screenHeight = request.getDeviceConfiguration().getScreenHeightDp();
         float edge = Math.min(screenWidth > 0 ? screenWidth : 192,
@@ -104,8 +109,7 @@ public final class AlarmTileService extends TileService {
         float textWidth = Math.max(120f, edge * 0.76f);
 
         AlarmAction action = actionable(state) ? state.action : null;
-        String buttonLabel = action == null
-                ? WatchAlarmStore.isRefreshing() ? "Checking…" : "Refresh" : action.label();
+        String buttonLabel = action == null ? "Refresh" : action.label();
         int color = action == AlarmAction.DISARM ? DISARM_RED
                 : action == AlarmAction.ARM_STAY ? ARM_GREEN : UNKNOWN_GREY;
         String label = state == null ? "State unknown" : safeText(state.label, "State unknown");
@@ -167,6 +171,7 @@ public final class AlarmTileService extends TileService {
         private final CallbackToFutureAdapter.Completer<T> completer;
         private final Supplier<T> result;
         private final long deadline = SystemClock.elapsedRealtime() + STATUS_WAIT_MS;
+        private final Object refresh = WatchAlarmStore.refreshIdentity();
         private boolean finished;
 
         RefreshWait(CallbackToFutureAdapter.Completer<T> completer, Supplier<T> result) {
@@ -175,7 +180,9 @@ public final class AlarmTileService extends TileService {
         }
         @Override public void run() {
             if (finished) return;
-            if (!WatchAlarmStore.isRefreshing() || SystemClock.elapsedRealtime() >= deadline) finish();
+            if (WatchAlarmStore.read(AlarmTileService.this).enabled
+                    || WatchAlarmStore.refreshIdentity() != refresh
+                    || !WatchAlarmStore.isRefreshing() || SystemClock.elapsedRealtime() >= deadline) finish();
             else handler.postDelayed(this, 100);
         }
         void finish() {
@@ -191,8 +198,13 @@ public final class AlarmTileService extends TileService {
     }
 
     @Override public void onDestroy() {
+        trace("service destroyed");
         for (RefreshWait<?> wait : new ArrayList<>(waits)) wait.finish();
         super.onDestroy();
+    }
+
+    private static void trace(String event) {
+        Log.i("AdtWatchTile", SystemClock.elapsedRealtime() + " " + event);
     }
 
     @Override protected ListenableFuture<ResourceBuilders.Resources> onTileResourcesRequest(

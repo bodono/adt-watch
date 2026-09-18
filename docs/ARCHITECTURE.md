@@ -60,10 +60,12 @@ action handshake. Finishing that attempt resumes status checks, including when
 the command outcome is uncertain. No retry carries an alarm command.
 
 The Tile also starts a status check when Wear OS requests stale content, since
-modern entry events may be delayed. It returns a checking frame immediately,
-then requests one follow-up render that can await status for at most eight
-seconds. The preview belongs to the recovery period, so rebinding the Tile
-service cannot repeat it indefinitely. Failed passive recovery has a persisted
+modern entry events may be delayed. Its original response awaits status for at
+most eight seconds and returns the useful result directly. v0.19's separate
+immediate checking frame was removed: physical traces showed a prompt READY
+reply followed by a substantially delayed second renderer request. Progress
+redraws are suppressed during recovery. Each waiter belongs to its initial
+recovery and cannot be extended by a replacement refresh. Failed passive recovery has a persisted
 60-second cooldown to prevent redraw loops. Visible app status refreshes near
 45 seconds, before its 60-second link freshness expires. Trusted update hints
 can advance a queued status query, rate-limited to one query per 250ms, while
@@ -90,3 +92,6 @@ overnight use exposed missed confirmation recovery; v0.18 addresses the
 one-shot status-query failure path but still requires physical validation.
 Automatic swipe refresh in v0.19 was observed on the personal watch; prolonged
 idle and repeated real alarm cycles still need normal-use verification.
+In the v0.20 status-only check, the original renderer request produced usable
+state in about one second, and the user confirmed that the colour appeared
+quickly. No alarm command was sent during that check.

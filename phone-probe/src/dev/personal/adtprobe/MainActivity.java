@@ -55,7 +55,7 @@ public final class MainActivity extends Activity {
             scroll.setPadding(edges.left, edges.top, edges.right, edges.bottom); return insets;
         });
         text("ADT Watch Setup", 28, Color.WHITE);
-        text("Personal app · v0.19", 15, Color.LTGRAY);
+        text("Personal app · v0.20", 15, Color.LTGRAY);
         text("One-tap watch control", 21, Color.WHITE);
         text("Red means ADT reported Armed: tap to Disarm. Green means ADT reported Disarmed: tap to Arm Stay. "
             + "The watch also has an ADT Watch tile you can add to its swipeable tiles.", 16, Color.LTGRAY);

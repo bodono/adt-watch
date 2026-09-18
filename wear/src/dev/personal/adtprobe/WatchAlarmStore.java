@@ -6,6 +6,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.Log;
 import androidx.annotation.Nullable;
 import com.google.android.gms.wearable.CapabilityClient;
 import com.google.android.gms.wearable.MessageEvent;
@@ -55,7 +56,6 @@ final class WatchAlarmStore {
 
     private static final class Recovery {
         final long started;
-        boolean tilePreviewed;
         boolean hinted;
         Recovery(long started) { this.started = started; }
         boolean live(long now) { return now >= started && now - started < RECOVERY_MS; }
@@ -153,11 +153,9 @@ final class WatchAlarmStore {
         return recovery != null && recovery.live(SystemClock.elapsedRealtime());
     }
 
-    /** One immediate loading frame per recovery; later tile requests can await its result. */
-    static synchronized boolean claimTilePreview() {
-        if (!isRefreshing() || recovery.tilePreviewed) return false;
-        recovery.tilePreviewed = true;
-        return true;
+    /** Opaque lifetime marker for UI waiters; never an alarm-action token. */
+    static synchronized Object refreshIdentity() {
+        return isRefreshing() ? recovery : null;
     }
 
     private static synchronized void startRecovery(Context app) {
@@ -175,6 +173,7 @@ final class WatchAlarmStore {
         Recovery started = new Recovery(now);
         started.hinted = hint;
         recovery = started;
+        diagnostic("RECOVERY_START");
         prefs(app).edit().putLong("passiveRecoveryStarted", now).putInt("passiveRecoveryBoot", boot(app)).apply();
         MAIN.postDelayed(() -> expireRecovery(app, started), RECOVERY_MS);
         changed(app);
@@ -195,9 +194,14 @@ final class WatchAlarmStore {
         expected.hinted = false;
         MAIN.postDelayed(() -> failQuery(app, query), QUERY_MS);
         try {
+            diagnostic("DISCOVERY_START");
             transport.discover(app, phone -> MAIN.post(() -> {
+                diagnostic("DISCOVERED durationMs=" + (SystemClock.elapsedRealtime() - query.started));
                 if (!selectSource(app, query, phone, SystemClock.elapsedRealtime(), boot(app))) return;
-                try { transport.query(app, phone, query.nonce, () -> MAIN.post(() -> failQuery(app, query))); }
+                try {
+                    diagnostic("QUERY_SEND");
+                    transport.query(app, phone, query.nonce, () -> MAIN.post(() -> failQuery(app, query)));
+                }
                 catch (RuntimeException error) { failQuery(app, query); }
             }), () -> MAIN.post(() -> failQuery(app, query)));
         } catch (RuntimeException error) { failQuery(app, query); }
@@ -229,12 +233,14 @@ final class WatchAlarmStore {
 
     private static synchronized void expireRecovery(Context context, Recovery expected) {
         if (recovery != expected) return;
+        diagnostic("RECOVERY_EXPIRE");
         if (pending != null && pending.owner == expected) markTransportFailed(context);
         cancelRecovery();
         changed(context);
     }
 
     private static void cancelRecovery() {
+        if (recovery != null) diagnostic("RECOVERY_CANCEL");
         recovery = null;
         pending = null;
         refreshQueued = false;
@@ -299,6 +305,7 @@ final class WatchAlarmStore {
         if (!trusted(p, boot) || !source.equals(p.getString("source", ""))) return false;
         boolean answer = !"-".equals(report.request);
         if (!answer) {
+            diagnostic("HINT_ACCEPT availability=" + report.availability.name());
             // An unsolicited report has no bounded round trip or ordered revision. It is a hint
             // to query, never freshness/ordering proof and never permission to clear a busy latch.
             pending = null;
@@ -326,6 +333,7 @@ final class WatchAlarmStore {
             if (!same && AlarmStateProtocol.uuid(oldRevision) && previousReceived >= 0
                     && now >= previousReceived && report.ageMillis > age(p, now)) return false;
             if (same && report.ageMillis == previousAge && report.availability == availability(p)) {
+                diagnostic("ANSWER_DUPLICATE availability=" + report.availability.name());
                 if (answer) pending = null;
                 p.edit().putLong("contactReceived", now).apply();
                 afterAnswer(context);
@@ -356,6 +364,7 @@ final class WatchAlarmStore {
             edit.remove("token").remove("tokenIssued");
         }
         edit.apply();
+        diagnostic("ANSWER_ACCEPT availability=" + report.availability.name());
         afterAnswer(context);
         changed(context);
         return true;
@@ -434,6 +443,7 @@ final class WatchAlarmStore {
 
     private static synchronized void failQuery(Context context, Query query) {
         if (pending != query) return;
+        diagnostic("QUERY_FAIL durationMs=" + (SystemClock.elapsedRealtime() - query.started));
         pending = null;
         markTransportFailed(context);
         scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
@@ -503,5 +513,9 @@ final class WatchAlarmStore {
     private static void changed(Context context) {
         // Tile renderer availability cannot undo a safely saved state or consumed token.
         try { AlarmTileService.requestUpdate(context); } catch (RuntimeException ignored) { }
+    }
+
+    private static void diagnostic(String event) {
+        Log.i("AdtWatchStatus", SystemClock.elapsedRealtime() + " " + event);
     }
 }

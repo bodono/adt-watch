@@ -40,9 +40,14 @@ public final class AlarmTileServiceTest {
     private AlarmTileService service;
     private WatchAlarmStore.StatusTransport original;
     private FakeTransport transport;
+    private AlarmTileService.UpdateSender originalUpdater;
+    private final List<Long> updates = new ArrayList<>();
 
     @Before public void prepare() {
         reset();
+        originalUpdater = ReflectionHelpers.getStaticField(AlarmTileService.class, "updateSender");
+        ReflectionHelpers.setStaticField(AlarmTileService.class, "updateSender",
+                (AlarmTileService.UpdateSender) context -> updates.add(SystemClock.elapsedRealtime()));
         controller = Robolectric.buildService(AlarmTileService.class).create();
         service = controller.get();
         Settings.Global.putInt(service.getContentResolver(), Settings.Global.BOOT_COUNT, BOOT);
@@ -56,6 +61,7 @@ public final class AlarmTileServiceTest {
         if (controller != null) controller.destroy();
         reset();
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "transport", original);
+        ReflectionHelpers.setStaticField(AlarmTileService.class, "updateSender", originalUpdater);
     }
 
     private void reset() {
@@ -66,9 +72,6 @@ public final class AlarmTileServiceTest {
     }
 
     @Test public void rendererRequestWithoutEnterEventAutomaticallyFetchesAndReturnsFreshTile() throws Exception {
-        ListenableFuture<TileBuilders.Tile> preview = request();
-        assertTrue("Visible checking frame does not wait for the phone", preview.isDone());
-        assertTrue(tileText(preview.get()).contains("Checking"));
         ListenableFuture<TileBuilders.Tile> result = request();
         idle();
         assertFalse(result.isDone());
@@ -85,11 +88,40 @@ public final class AlarmTileServiceTest {
         assertEquals("Store-driven tile redraws do not start a query loop", 1, transport.nonces.size());
     }
 
+    @Test public void readyReplyCompletesOriginalWaitEvenIfAnotherRecoveryStartsBeforeItsNextTick() throws Exception {
+        ListenableFuture<TileBuilders.Tile> original = request();
+        idle();
+        assertFalse(original.isDone());
+        assertEquals(1, transport.nonces.size());
+
+        // Let the query throttle elapse while the original reply is still pending.
+        // The renderer is deliberately not simulated by requestUpdate: requests above
+        // are explicit, and no extra onTileRequest callback is assumed here.
+        advance(2_000);
+        reply(0, 0);
+        assertTrue(WatchAlarmStore.read(service).enabled);
+        assertFalse("READY arrived between the original waiter's polling ticks", original.isDone());
+
+        // A delayed ENTER or another explicit refresh can start a new cycle before
+        // the old waiter's next tick. Leave this second status query unanswered.
+        WatchAlarmStore.refresh(service);
+        idle();
+        assertTrue(WatchAlarmStore.isRefreshing());
+        assertEquals(2, transport.nonces.size());
+        advance(100);
+
+        assertTrue("A replacement recovery cannot delay an already usable tile", original.isDone());
+        assertTrue(tileText(original.get()).contains("Arm Stay"));
+        assertTrue("Completing the tile must not cancel the shared replacement recovery",
+                WatchAlarmStore.isRefreshing());
+        assertNull("Rendering the recovered state cannot authorize an alarm action",
+                ReflectionHelpers.getStaticField(WatchAlarmStore.class, "activeSelection"));
+    }
+
     @Test public void oldCachedStatusIsFetchedWithoutARefreshTap() throws Exception {
         request(); idle(); reply(0, 0); advance(100);
         advance(61_000);
         assertFalse(WatchAlarmStore.read(service).enabled);
-        assertTrue(request().isDone());
         ListenableFuture<TileBuilders.Tile> result = request(); idle();
         assertFalse(result.isDone());
         assertEquals(2, transport.nonces.size());
@@ -99,11 +131,10 @@ public final class AlarmTileServiceTest {
     }
 
     @Test public void unansweredQueryReturnsWithinThePlatformDeadlineAndCannotLoopOnRedraw() throws Exception {
-        assertTrue(request().isDone());
         ListenableFuture<TileBuilders.Tile> result = request(); idle();
         advance(7_999); assertFalse(result.isDone());
         advance(1); assertTrue(result.isDone());
-        assertTrue(tileText(result.get()).contains("Checking"));
+        assertTrue(tileText(result.get()).contains("Refresh"));
         assertFalse(WatchAlarmStore.read(service).enabled);
         advance(22_000);
         assertFalse(WatchAlarmStore.isRefreshing());
@@ -115,7 +146,6 @@ public final class AlarmTileServiceTest {
     }
 
     @Test public void cancellationAndServiceDestructionDoNotCancelSharedStatusRecovery() {
-        assertTrue(request().isDone());
         ListenableFuture<TileBuilders.Tile> cancelled = request();
         ListenableFuture<TileBuilders.Tile> surviving = request(); idle();
         cancelled.cancel(false); idle();
@@ -130,13 +160,13 @@ public final class AlarmTileServiceTest {
         assertTrue(WatchAlarmStore.read(service).enabled);
     }
 
-    @Test public void rebindingServiceCannotRepeatThePreviewOrStartAnotherQuery() throws Exception {
-        assertTrue(request().isDone()); idle();
+    @Test public void rebindingServiceWaitsForTheExistingQuery() throws Exception {
+        assertFalse(request().isDone()); idle();
         controller.destroy();
         controller = Robolectric.buildService(AlarmTileService.class).create();
         service = controller.get();
         ListenableFuture<TileBuilders.Tile> result = request(); idle();
-        assertFalse("The recovery owns the preview claim across service instances", result.isDone());
+        assertFalse("Rebinding must join the existing recovery", result.isDone());
         assertEquals(1, transport.nonces.size());
         reply(0, 0); advance(100);
         assertTrue(tileText(result.get()).contains("Arm Stay"));
@@ -154,6 +184,37 @@ public final class AlarmTileServiceTest {
         assertTrue(entered.isDone());
         assertTrue(tile.isDone());
         assertNull(entered.get());
+    }
+
+    @Test public void progressDoesNotUseRedrawAllowanceBeforeTheOriginalResponseIsReady() throws Exception {
+        ListenableFuture<TileBuilders.Tile> result = request(); idle();
+        assertTrue("Starting and selecting the phone do not publish a loading frame", updates.isEmpty());
+        assertFalse(result.isDone());
+        assertTrue(WatchAlarmStore.accept(service, PHONE, new AlarmStateProtocol.Report(
+                transport.nonces.get(0), AlarmStateProtocol.State.UNKNOWN,
+                AlarmStateProtocol.Availability.BUSY, "-", 0), SystemClock.elapsedRealtime(), BOOT));
+        idle();
+        assertTrue("A transient reply does not use the renderer update allowance", updates.isEmpty());
+        assertFalse(result.isDone());
+        advance(2_000);
+        reply(1, 0); advance(100);
+        assertEquals("Completed recovery publishes one useful update", 1, updates.size());
+        assertTrue(result.isDone());
+        assertTrue("The original response contains the answer even if redraws are never delivered",
+                tileText(result.get()).contains("Arm Stay"));
+        assertNull(ReflectionHelpers.getStaticField(WatchAlarmStore.class, "activeSelection"));
+    }
+
+    @Test public void delayedEnterBatchDoesNotRestartFreshCompletedRecovery() throws Exception {
+        ListenableFuture<TileBuilders.Tile> tile = request(); idle(); reply(0, 0); advance(100);
+        assertTrue(tile.isDone());
+        EventBuilders.TileInteractionEvent enter = new EventBuilders.TileInteractionEvent.Builder(
+                1, EventBuilders.TileInteractionEvent.ENTER).build();
+        ListenableFuture<Void> entered = service.onRecentInteractionEventsAsync(Collections.singletonList(enter));
+        assertTrue(entered.isDone());
+        advance(3_000);
+        assertEquals(1, transport.nonces.size());
+        assertFalse(WatchAlarmStore.isRefreshing());
     }
 
     private String tileText(TileBuilders.Tile tile) {
