@@ -45,7 +45,10 @@ final class PhoneAlarmState {
         final AlarmStateProtocol.Availability availability;
         final AlarmStateProtocol.Evidence evidence = AlarmStateProtocol.Evidence.ADT_QUERY;
         final boolean pending;
-        Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure) {
+        /** The most recent read did not succeed. Status may still be READY from an earlier fresh read. */
+        final boolean readFailed;
+        Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure, boolean readFailed) {
+            this.readFailed = readFailed;
             state = value != null && failure == null ? value.state : AlarmStateProtocol.State.UNKNOWN;
             revision = value == null ? "-" : value.revision;
             observationId = value == null ? "-" : value.observationId;
@@ -58,19 +61,21 @@ final class PhoneAlarmState {
 
     static synchronized Snapshot snapshot(Context context) {
         AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
-        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP);
+        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP, true);
         SharedPreferences stored = preferences(context);
         AdtLiveLedger.Snapshot value = read(stored, binding).snapshot(SystemClock.elapsedRealtime(), boot(context));
+        String status = stored.getString("queryStatus", "UNAVAILABLE");
+        boolean readFailed = !lastReadSucceeded(stored);
         AlarmStateProtocol.Availability failure = null;
         if (storageFailed) failure = AlarmStateProtocol.Availability.NO_STATE;
         else if (!binding.id.equals(stored.getString("bindingId", ""))) failure = AlarmStateProtocol.Availability.NO_STATE;
-        else {
-            String status = stored.getString("queryStatus", "UNAVAILABLE");
-            if ("LOGIN_REQUIRED".equals(status) || "VERIFY_LOGIN".equals(status)) failure = AlarmStateProtocol.Availability.NO_ACCESS;
-            else if ("AMBIGUOUS".equals(status) || "UNSUPPORTED".equals(status)) failure = AlarmStateProtocol.Availability.NO_STATE;
-            else if (!"READY".equals(status) && !"BUSY".equals(status)) failure = AlarmStateProtocol.Availability.OFFLINE;
-        }
-        return new Snapshot(value, failure);
+        else if ("LOGIN_REQUIRED".equals(status) || "VERIFY_LOGIN".equals(status)) failure = AlarmStateProtocol.Availability.NO_ACCESS;
+        else if ("AMBIGUOUS".equals(status) || "UNSUPPORTED".equals(status)) failure = AlarmStateProtocol.Availability.NO_STATE;
+        // A transient failure (timeout, server error, no network) says nothing about the alarm, so
+        // a still-fresh observation keeps its availability. Commands separately insist on a
+        // successful preflight read through readFailed.
+        else if (readFailed && !value.fresh) failure = AlarmStateProtocol.Availability.OFFLINE;
+        return new Snapshot(value, failure, readFailed);
     }
 
     /** Worker-only read that reuses a successful read younger than REUSE_MS. */
