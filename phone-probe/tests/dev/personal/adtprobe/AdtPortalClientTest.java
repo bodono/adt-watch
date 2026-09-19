@@ -4,6 +4,8 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -13,6 +15,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import javax.net.ssl.SSLException;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Before;
@@ -155,19 +158,21 @@ public final class AdtPortalClientTest {
     }
 
     @Test public void loginMfaRedirectAndServerErrorsAreDistinctWithoutEchoingPrivateData() {
-        int[] codes = {401, 403, 423, 302, 500};
+        int[] codes = {401, 403, 423, 302, 500, 409};
         AdtPortalClient.Status[] statuses = {AdtPortalClient.Status.LOGIN_REQUIRED, AdtPortalClient.Status.VERIFY_LOGIN,
-            AdtPortalClient.Status.VERIFY_LOGIN, AdtPortalClient.Status.LOGIN_REQUIRED, AdtPortalClient.Status.UNAVAILABLE};
+            AdtPortalClient.Status.VERIFY_LOGIN, AdtPortalClient.Status.LOGIN_REQUIRED, AdtPortalClient.Status.UNAVAILABLE,
+            AdtPortalClient.Status.VERIFY_LOGIN};
         for (int i = 0; i < codes.length; i++) {
             transport.responses.add(new AdtPortalClient.Response(codes[i], "text/html", SECRET.getBytes(StandardCharsets.UTF_8), null));
             AdtPortalClient.Result result = client.query(clock.now + 5_000);
             assertEquals(statuses[i], result.status); assertEquals(AlarmStateProtocol.State.UNKNOWN, result.state);
             assertEquals("", result.systemId); assertEquals("", result.partitionLabel);
             assertFalse(result.toString().contains(SECRET));
+            assertEquals("IDENTITIES/HTTP/" + codes[i], result.diagnosticCode());
         }
         transport.responses.add(new AdtPortalClient.Response(200, "text/html", SECRET.getBytes(StandardCharsets.UTF_8), null));
         assertEquals(AdtPortalClient.Status.LOGIN_REQUIRED, client.query(clock.now + 5_000).status);
-        assertEquals(6, transport.requests.size()); // Redirects never cause a follow-up request.
+        assertEquals(7, transport.requests.size()); // Redirects never cause a follow-up request.
         for (AdtPortalClient.Request request : transport.requests) assertFalse(request.toString().contains(SECRET));
     }
 
@@ -212,6 +217,190 @@ public final class AdtPortalClientTest {
             assertEquals("www.alarm.com", connection.getURL().getHost()); assertEquals("https", connection.getURL().getProtocol());
             assertEquals("inert-afg", connection.getRequestProperty("ajaxrequestuniquekey"));
         }
+    }
+
+    @Test public void diagnosticsClassifyExceptionsWithoutExposingExceptionText() {
+        IOException[] failures = {new SocketTimeoutException(SECRET), new UnknownHostException(SECRET),
+            new SSLException(SECRET), new IOException(SECRET)};
+        String[] reasons = {"TIMEOUT", "DNS", "TLS", "IO"};
+        for (int i = 0; i < failures.length; i++) {
+            final IOException failure = failures[i];
+            AdtPortalClient.Result result = new AdtPortalClient(session, (request, deadline) -> { throw failure; }, clock).query(5_000);
+            assertEquals(AdtPortalClient.Status.UNAVAILABLE, result.status);
+            assertEquals("IDENTITIES/" + reasons[i], result.diagnosticCode());
+            assertFalse(result.diagnosticCode().contains(SECRET));
+        }
+    }
+
+    @Test public void diagnosticsIdentifyFailedResourceStageAndBoundHttpCodes() throws Exception {
+        transport.responses.add(json(identities()));
+        transport.responses.add(new AdtPortalClient.Response(404, "text/html", SECRET.getBytes(StandardCharsets.UTF_8), null));
+        assertEquals("SYSTEM/HTTP/404", client.query(5_000).diagnosticCode());
+        enqueue(identities(), system());
+        transport.responses.add(new AdtPortalClient.Response(412, "text/html", SECRET.getBytes(StandardCharsets.UTF_8), null));
+        assertEquals("PARTITION/HTTP/412", client.query(5_000).diagnosticCode());
+        transport.responses.add(new AdtPortalClient.Response(123456789, "text/html", new byte[0], null));
+        assertEquals("IDENTITIES/HTTP", client.query(5_000).diagnosticCode());
+        enqueue(identities(), system(), new JSONObject().put("private", SECRET));
+        assertEquals("PARTITION/SCHEMA/200", client.query(5_000).diagnosticCode());
+    }
+
+    @Test public void diagnosticsDistinguishResponseBoundsSessionAndCookieFailures() throws Exception {
+        assertEquals("IDENTITIES/EMPTY_RESPONSE", new AdtPortalClient(session, (request, deadline) -> null, clock)
+            .query(5_000).diagnosticCode());
+        transport.responses.add(new AdtPortalClient.Response(200, "application/json", new byte[0], null));
+        assertEquals("IDENTITIES/EMPTY_RESPONSE/200", client.query(5_000).diagnosticCode());
+        transport.responses.add(new AdtPortalClient.Response(200, "application/json", new byte[1],
+            Collections.singletonList("session=" + SECRET + "\r\nInjected: value")));
+        assertEquals("IDENTITIES/COOKIE_FORMAT/200", client.query(5_000).diagnosticCode());
+        List<FakeConnection> connections = new ArrayList<>();
+        AdtPortalClient.HttpTransport http = new AdtPortalClient.HttpTransport(clock, url -> {
+            FakeConnection connection = new FakeConnection(url, new AdtPortalClient.Response(200, "application/json",
+                new byte[AdtPortalClient.MAX_IDENTITY_BODY_BYTES + 1], null));
+            connections.add(connection); return connection;
+        });
+        assertEquals("IDENTITIES/RESPONSE_SIZE/200", new AdtPortalClient(session, http, clock).query(5_000).diagnosticCode());
+        assertTrue(connections.get(0).disconnected);
+        session.cookie = "";
+        assertEquals("SESSION/SESSION", client.query(5_000).diagnosticCode());
+        session.cookie = "afg=one; afg=two";
+        assertEquals("SESSION/COOKIE_FORMAT", client.query(5_000).diagnosticCode());
+        assertEquals("SESSION/TIMEOUT", client.query(clock.now).diagnosticCode());
+    }
+
+    @Test public void sessionReadsAndCookieWritesUseTheExactApiRequestUrl() throws Exception {
+        List<String> reads = new ArrayList<>(), writes = new ArrayList<>();
+        AdtPortalClient.Session scoped = new AdtPortalClient.Session() {
+            @Override public String cookies() { throw new AssertionError("Do not request origin-only cookies"); }
+            @Override public String cookies(String url) { reads.add(url); return "afg=inert-afg; session=" + SECRET; }
+            @Override public String userAgent() { return "Inert-Agent/1"; }
+            @Override public void storeCookie(String cookie) { throw new AssertionError("A response URL is required"); }
+            @Override public void storeCookie(String url, String cookie) { writes.add(url); }
+        };
+        for (JSONObject document : new JSONObject[]{identities(), system(), partition(1, 1)}) {
+            AdtPortalClient.Response response = json(document);
+            transport.responses.add(new AdtPortalClient.Response(200, response.contentType, response.body,
+                Collections.singletonList("session=" + SECRET + "; Path=/web; Secure")));
+        }
+        assertEquals(AdtPortalClient.Status.READY, new AdtPortalClient(scoped, transport, clock).query(5_000).status);
+        List<String> expected = Arrays.asList(AdtPortalClient.ORIGIN + "/web/api/identities",
+            AdtPortalClient.ORIGIN + "/web/api/systems/systems/" + SYSTEM,
+            AdtPortalClient.ORIGIN + "/web/api/devices/partitions/" + PARTITION);
+        assertEquals(expected, reads); assertEquals(expected, writes);
+    }
+
+    @Test public void identityConfigurationCanExceedDeviceLimitWithinItsSeparateBound() throws Exception {
+        char[] padding = new char[AdtPortalClient.MAX_BODY_BYTES + 1_024]; Arrays.fill(padding, 'x');
+        JSONObject largeIdentity = identities().put("included", new JSONArray().put(new JSONObject()
+            .put("type", "portal/configuration").put("description", new String(padding))));
+        AdtPortalClient.Response identity = json(largeIdentity);
+        assertTrue(identity.body.length > AdtPortalClient.MAX_BODY_BYTES);
+        assertTrue(identity.body.length < AdtPortalClient.MAX_IDENTITY_BODY_BYTES);
+        Deque<AdtPortalClient.Response> replies = new ArrayDeque<>(Arrays.asList(identity, json(system()), json(partition(1, 1))));
+        List<FakeConnection> connections = new ArrayList<>();
+        AdtPortalClient.HttpTransport http = new AdtPortalClient.HttpTransport(clock, url -> {
+            FakeConnection connection = new FakeConnection(url, replies.remove()); connections.add(connection); return connection;
+        });
+        AdtPortalClient.Result result = new AdtPortalClient(session, http, clock).query(5_000);
+        assertEquals(AdtPortalClient.Status.READY, result.status);
+        assertEquals(AlarmStateProtocol.State.DISARMED, result.state);
+        assertEquals(3, connections.size());
+        for (FakeConnection connection : connections) assertTrue(connection.disconnected);
+    }
+
+    @Test public void partitionKeepsItsSmallerBoundEvenWithoutContentLength() throws Exception {
+        AdtPortalClient.Response oversized = new AdtPortalClient.Response(200, "application/json",
+            new byte[AdtPortalClient.MAX_BODY_BYTES + 1], null);
+        Deque<AdtPortalClient.Response> replies = new ArrayDeque<>(Arrays.asList(json(identities()), json(system()), oversized));
+        List<FakeConnection> connections = new ArrayList<>();
+        AdtPortalClient.HttpTransport http = new AdtPortalClient.HttpTransport(clock, url -> {
+            FakeConnection connection = new FakeConnection(url, replies.remove());
+            connection.advertisedLength = -1; connections.add(connection); return connection;
+        });
+        assertEquals("PARTITION/RESPONSE_SIZE/200", new AdtPortalClient(session, http, clock).query(5_000).diagnosticCode());
+        assertEquals(3, connections.size()); assertTrue(connections.get(2).inputRead);
+        for (FakeConnection connection : connections) assertTrue(connection.disconnected);
+        enqueue(identities(), system()); transport.responses.add(oversized);
+        assertEquals("PARTITION/RESPONSE_SIZE/200", client.query(5_000).diagnosticCode());
+    }
+
+    @Test public void largeLoginHtmlIsClassifiedWithoutReadingItsBody() {
+        List<FakeConnection> connections = new ArrayList<>();
+        AdtPortalClient.HttpTransport http = new AdtPortalClient.HttpTransport(clock, url -> {
+            FakeConnection connection = new FakeConnection(url,
+                new AdtPortalClient.Response(200, "text/html; charset=UTF-8", new byte[0], null));
+            connection.advertisedLength = AdtPortalClient.MAX_IDENTITY_BODY_BYTES + 1L;
+            connections.add(connection); return connection;
+        });
+        AdtPortalClient.Result result = new AdtPortalClient(session, http, clock).query(5_000);
+        assertEquals(AdtPortalClient.Status.LOGIN_REQUIRED, result.status);
+        assertEquals("IDENTITIES/CONTENT_TYPE/200", result.diagnosticCode());
+        assertEquals(1, connections.size()); assertFalse(connections.get(0).inputRead);
+        assertTrue(connections.get(0).disconnected);
+    }
+
+    @Test public void boundReadSkipsIdentitiesAndProvesSavedSystemMembershipBeforeReadingActualState() throws Exception {
+        for (int state = 1; state <= 3; state++) {
+            enqueue(system(), partition(state, state));
+            AdtPortalClient.Result result = client.queryBound(SYSTEM, PARTITION, clock.now + 5_000);
+            assertEquals(AdtPortalClient.Status.READY, result.status);
+            assertEquals(state, result.actualStateCode); assertEquals(SYSTEM, result.systemId);
+            assertEquals(PARTITION, result.partitionId); assertEquals(200, result.elapsedMillis);
+        }
+        assertEquals(6, transport.requests.size());
+        for (int i = 0; i < transport.requests.size(); i++) {
+            assertEquals(AdtPortalClient.ORIGIN + (i % 2 == 0 ? "/web/api/systems/systems/" + SYSTEM
+                : "/web/api/devices/partitions/" + PARTITION), transport.requests.get(i).url);
+            assertEquals(AdtPortalClient.MAX_BODY_BYTES, transport.requests.get(i).maxBodyBytes);
+        }
+    }
+
+    @Test public void boundReadRejectsChangedSystemOrPartitionMembershipBeforeAnyPartitionGet() throws Exception {
+        JSONObject wrongSystem = system(); wrongSystem.getJSONObject("data").put("id", "another-system");
+        transport.responses.add(json(wrongSystem));
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.queryBound(SYSTEM, PARTITION, 5_000).status);
+        JSONObject movedPartition = system();
+        movedPartition.getJSONObject("data").getJSONObject("relationships").getJSONObject("partitions")
+            .put("data", new JSONArray().put(ref("another-partition", "devices/partition")));
+        transport.responses.add(json(movedPartition));
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.queryBound(SYSTEM, PARTITION, 5_000).status);
+        JSONObject multiple = system();
+        multiple.getJSONObject("data").getJSONObject("relationships").getJSONObject("partitions").getJSONArray("data")
+            .put(ref("another-partition", "devices/partition"));
+        transport.responses.add(json(multiple));
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.queryBound(SYSTEM, PARTITION, 5_000).status);
+        assertEquals(3, transport.requests.size());
+        for (AdtPortalClient.Request request : transport.requests)
+            assertEquals(AdtPortalClient.ORIGIN + "/web/api/systems/systems/" + SYSTEM, request.url);
+    }
+
+    @Test public void boundReadRejectsWrongPartitionResponseOrExplicitContradictoryOwner() throws Exception {
+        JSONObject wrongPartition = partition(1, 1); wrongPartition.getJSONObject("data").put("id", "another-partition");
+        enqueue(system(), wrongPartition);
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.queryBound(SYSTEM, PARTITION, 5_000).status);
+        JSONObject wrongOwner = partition(1, 1);
+        wrongOwner.getJSONObject("data").put("relationships", new JSONObject().put("system",
+            new JSONObject().put("data", ref("another-system", "systems/system"))));
+        enqueue(system(), wrongOwner);
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.queryBound(SYSTEM, PARTITION, 5_000).status);
+        assertEquals(4, transport.requests.size());
+    }
+
+    @Test public void boundReadCannotGuessMissingIdsAndStillRequiresAuthentication() {
+        for (String invalid : new String[]{null, "", "../outside", "a?command=disarm", "https://elsewhere.invalid"}) {
+            assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.queryBound(invalid, PARTITION, 5_000).status);
+            assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.queryBound(SYSTEM, invalid, 5_000).status);
+        }
+        assertTrue(transport.requests.isEmpty());
+        transport.responses.add(new AdtPortalClient.Response(401, "text/html", new byte[0], null));
+        AdtPortalClient.Result result = client.queryBound(SYSTEM, PARTITION, 5_000);
+        assertEquals(AdtPortalClient.Status.LOGIN_REQUIRED, result.status);
+        assertEquals("SYSTEM/HTTP/401", result.diagnosticCode());
+        transport.responses.add(new AdtPortalClient.Response(409, "text/html", new byte[0], null));
+        result = client.queryBound(SYSTEM, PARTITION, 5_000);
+        assertEquals(AdtPortalClient.Status.VERIFY_LOGIN, result.status);
+        assertEquals("SYSTEM/HTTP/409", result.diagnosticCode());
+        assertEquals(2, transport.requests.size());
     }
 
     private void enqueue(int actual, int desired) throws Exception { enqueue(identities(), system(), partition(actual, desired)); }
@@ -261,13 +450,14 @@ public final class AdtPortalClientTest {
     }
     private static final class FakeConnection extends HttpURLConnection {
         final AdtPortalClient.Response response;
-        boolean disconnected;
+        boolean disconnected, inputRead;
+        long advertisedLength = -2;
         FakeConnection(URL url, AdtPortalClient.Response response) { super(url); this.response = response; }
         @Override public int getResponseCode() { return response.code; }
         @Override public String getContentType() { return response.contentType; }
-        @Override public long getContentLengthLong() { return response.body.length; }
+        @Override public long getContentLengthLong() { return advertisedLength == -2 ? response.body.length : advertisedLength; }
         @Override public Map<String, List<String>> getHeaderFields() { return Collections.emptyMap(); }
-        @Override public InputStream getInputStream() { return new ByteArrayInputStream(response.body); }
+        @Override public InputStream getInputStream() { inputRead = true; return new ByteArrayInputStream(response.body); }
         @Override public void disconnect() { disconnected = true; }
         @Override public boolean usingProxy() { return false; }
         @Override public void connect() throws IOException { }

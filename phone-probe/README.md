@@ -1,6 +1,6 @@
 # ADT Watch Setup — phone module
 
-The v0.22 companion queries ADT status through a separate authenticated website
+The v0.23 companion queries ADT status through a separate authenticated website
 session and executes requests through two user-configured native ADT widgets.
 The live-query integration is undergoing validation.
 

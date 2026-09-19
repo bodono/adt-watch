@@ -76,6 +76,9 @@ public final class AdtPortalSetupActivityTest {
         assertTrue(text.contains("Disarmed")); assertTrue(text.contains("Inert home"));
         assertTrue(text.contains("Inert partition")); assertTrue(text.contains("0.3 seconds"));
         assertEquals(alarm, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getAll());
+        Map<String, ?> diagnostic = context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).getAll();
+        assertEquals(Set.of("code", "status", "elapsedMillis"), diagnostic.keySet());
+        assertFalse(diagnostic.toString().contains("Inert home"));
         assertFalse(ArmExperimentService.isRunning());
     }
 
@@ -94,8 +97,12 @@ public final class AdtPortalSetupActivityTest {
     }
 
     @Test public void timeoutCannotBeReplacedByAnOldSuccessfulResultOrAutoRetry() {
+        context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).edit()
+            .putString("code", "IDENTITIES/HTTP/500").commit();
         answer = ready(); begin();
+        assertEquals("UI/CHECKING", context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).getString("code", ""));
         Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(10));
+        assertEquals("UI/TIMEOUT", context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).getString("code", ""));
         assertTrue(screenText().contains("10 seconds")); assertTrue(button("Check live status").isEnabled());
         finishQuery(); // The expired FutureTask cannot even begin a query after timeout.
         assertEquals(0, queries); assertNull(AdtPortalSession.binding(context));
@@ -110,7 +117,8 @@ public final class AdtPortalSetupActivityTest {
         controller.pause(); idle(); controller.resume().windowFocusChanged(true); idle();
         assertEquals(1, queries); assertNull(AdtPortalSession.binding(context));
         assertEquals(View.GONE, button("Use this ADT system").getVisibility());
-        assertTrue(screenText().contains("Finish signing in"));
+        assertTrue(screenText().contains("Tap Check live status"));
+        assertEquals("UI/CANCELLED", context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).getString("code", ""));
     }
 
     @Test public void expiryLockAndNewNavigationInvalidateChoiceWithoutSaving() {

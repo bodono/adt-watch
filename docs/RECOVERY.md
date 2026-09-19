@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide describes v0.22, whose live-query integration is undergoing
+This guide describes v0.23, whose live-query integration is undergoing
 validation. Rebuilding the apps does not recreate their private device setup.
 The owner completes native widget consent, watch association, routine approval
 and both ADT sign-ins on their devices.
@@ -84,7 +84,7 @@ adb -d install -r build/phone-probe.apk
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
 builds at the same version and signature. Update the watch first, then the phone.
-Both apps need v0.22 for live-query observation identity and freshness handling.
+Both apps need v0.23 for live-query observation identity and freshness handling.
 After updating an earlier installation, complete the new website sign-in and
 explicit system selection below; existing native ADT sign-in is not enough.
 
@@ -191,7 +191,7 @@ controls without waiting for a notification; the earlier uncertain request is
 not automatically repeated. Native ADT work already queued can execute later.
 
 Earlier native-widget cycles worked with the phone locked and ADT set to
-Unrestricted. v0.22 live queries, session longevity and reliable overnight use
+Unrestricted. v0.23 live queries, session longevity and reliable overnight use
 still require physical verification.
 
 ## Changes and troubleshooting

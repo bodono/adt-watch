@@ -19,15 +19,26 @@ final class AdtPortalSession {
         String agent = WebSettings.getDefaultUserAgent(context.getApplicationContext());
         return new AdtPortalClient.Session() {
             private boolean changed;
-            @Override public String cookies() { return manager.getCookie(COOKIE_ORIGIN); }
+            @Override public String cookies() { return cookies(COOKIE_ORIGIN + "/web/api/identities"); }
+            @Override public String cookies(String requestUrl) {
+                requireApiUrl(requestUrl);
+                return manager.getCookie(requestUrl);
+            }
             @Override public String userAgent() { return agent; }
-            @Override public void storeCookie(String value) {
-                if (value != null && !value.isEmpty()) { manager.setCookie(COOKIE_ORIGIN, value); changed = true; }
+            @Override public void storeCookie(String value) { storeCookie(COOKIE_ORIGIN + "/web/api/identities", value); }
+            @Override public void storeCookie(String responseUrl, String value) {
+                requireApiUrl(responseUrl);
+                if (value != null && !value.isEmpty()) { manager.setCookie(responseUrl, value); changed = true; }
             }
             @Override public void persist() {
                 if (changed) { manager.flush(); changed = false; }
             }
         };
+    }
+
+    private static void requireApiUrl(String url) {
+        if (url == null || !url.startsWith(COOKIE_ORIGIN + "/web/api/"))
+            throw new IllegalArgumentException("Unexpected cookie scope");
     }
 
     static final class Binding {

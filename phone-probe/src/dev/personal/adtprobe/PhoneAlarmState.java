@@ -189,7 +189,10 @@ final class PhoneAlarmState {
         try {
             long remaining = deadline - SystemClock.elapsedRealtime();
             if (remaining <= 0) return null;
-            return new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS)).query(deadline);
+            AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
+            if (binding == null) return null;
+            return new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS))
+                .queryBound(binding.systemId, binding.partitionId, deadline);
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }
         finally { session.cancel(false); }

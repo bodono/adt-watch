@@ -30,7 +30,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
 
-/** Read-only portal prototype. Selecting a system never changes alarm or watch authority. */
+/** Official website sign-in and read-only selection of the alarm supplying watch status. */
 public final class AdtPortalSetupActivity extends Activity {
     static final String LOGIN_URL = "https://smartservices.adt.co.uk/";
     private static final long QUERY_MS = 10_000, CHOICE_MS = 60_000;
@@ -104,6 +104,7 @@ public final class AdtPortalSetupActivity extends Activity {
         final int ticket = ++generation;
         final long queryDeadline = deadline;
         status.setText("Checking ADT…");
+        recordDiagnostic("UI/CHECKING", "BUSY", 0);
         FutureTask<Void> work = new FutureTask<>(() -> {
             AdtPortalClient.Result result;
             try { result = queryOperation.query(session, queryDeadline); }
@@ -114,7 +115,8 @@ public final class AdtPortalSetupActivity extends Activity {
         inFlight = work; updateButtons();
         handler.postDelayed(() -> {
             if (ticket != generation || inFlight == null) return;
-            cancelQuery(); status.setText("ADT did not answer within 10 seconds. Sign in below, then try again."); updateButtons();
+            recordDiagnostic("UI/TIMEOUT", "UNAVAILABLE", Math.max(0, SystemClock.elapsedRealtime() - queryStarted));
+            cancelQuery(); status.setText("ADT did not answer within 10 seconds. Try the status check again.\nCheck code: UI/TIMEOUT"); updateButtons();
         }, QUERY_MS);
         try { queryExecutor.execute(work); }
         catch (RuntimeException ignored) { complete(ticket, null); }
@@ -123,6 +125,9 @@ public final class AdtPortalSetupActivity extends Activity {
     private void complete(int ticket, AdtPortalClient.Result result) {
         if (ticket != generation || inFlight == null || !resumed) return;
         inFlight = null;
+        // Closed diagnostics only: no account IDs, state payloads, URLs, cookies or exception text.
+        recordDiagnostic(result == null ? "UI/NO_RESULT" : result.diagnosticCode(),
+            result == null ? "UNAVAILABLE" : result.status.name(), result == null ? 0 : result.elapsedMillis);
         long now = SystemClock.elapsedRealtime();
         if (now < queryStarted || now >= deadline) {
             status.setText("The ADT check expired. Tap Check live status again.");
@@ -134,8 +139,14 @@ public final class AdtPortalSetupActivity extends Activity {
                 + "\nPartition: " + display(result.partitionLabel, result.partitionId)
                 + String.format(Locale.UK, "\nQuery: %.1f seconds.", Math.max(0, result.elapsedMillis) / 1000.0)
                 + "\nBefore choosing, check that this is the same home as your configured Arm Stay and Disarm scenes.");
-        } else status.setText(failureMessage(result == null ? null : result.status));
+        } else status.setText(failureMessage(result == null ? null : result.status)
+            + (result == null ? "" : "\nCheck code: " + result.diagnosticCode()));
         updateButtons();
+    }
+
+    private void recordDiagnostic(String code, String statusValue, long elapsed) {
+        getSharedPreferences("adt_portal_diagnostics", MODE_PRIVATE).edit().clear()
+            .putString("code", code).putString("status", statusValue).putLong("elapsedMillis", elapsed).apply();
     }
 
     private void chooseSystem() {
@@ -222,7 +233,7 @@ public final class AdtPortalSetupActivity extends Activity {
             case BUSY: return "ADT has not confirmed a settled status. No system was selected. Check the ADT page, then try again.";
             case AMBIGUOUS: return "ADT returned more than one system or partition. No system was selected.";
             case UNSUPPORTED: return "This ADT status response is not supported. No system was selected.";
-            default: return "ADT status is unavailable. Sign in below, then try again.";
+            default: return "The ADT status request failed. Check code below; signing in again may not be needed.";
         }
     }
     private static String stateLabel(AlarmStateProtocol.State state) {
@@ -245,8 +256,10 @@ public final class AdtPortalSetupActivity extends Activity {
     }
     @Override public void onResume() { super.onResume(); resumed = true; if (web != null) web.onResume(); handler.post(tick); updateButtons(); }
     @Override public void onPause() {
-        resumed = false; handler.removeCallbacks(tick); cancelQuery(); candidate = null;
-        if (status != null) status.setText("Finish signing in to ADT, then tap Check live status.");
+        resumed = false; handler.removeCallbacks(tick);
+        if (inFlight != null) recordDiagnostic("UI/CANCELLED", "UNAVAILABLE", Math.max(0, SystemClock.elapsedRealtime() - queryStarted));
+        cancelQuery(); candidate = null;
+        if (status != null) status.setText("Tap Check live status to read ADT again.");
         updateButtons(); if (web != null) web.onPause(); CookieManager.getInstance().flush(); super.onPause();
     }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); updateButtons(); }

@@ -1,6 +1,6 @@
 # How ADT Watch works
 
-The v0.22 architecture separates status queries from alarm execution. The phone
+The v0.23 architecture separates status queries from alarm execution. The phone
 and Wear modules share application ID `dev.personal.adtprobe` and a signing
 identity. Google Play Services carries bounded, source-matched messages between
 them. Live-query integration is undergoing validation.
@@ -20,8 +20,13 @@ session cookies in app-private storage; the status client uses those cookies
 for authenticated queries. No JavaScript bridge is installed. Session expiry or
 additional verification requires the owner to return to the sign-in page.
 
-The client permits only fixed HTTPS GET routes on Alarm.com's website API. It
-validates the returned system and partition relationships, state fields, content
+The client permits only fixed HTTPS GET routes on Alarm.com's website API.
+Setup discovers the account's selected system through the identities endpoint;
+that response may include substantial portal configuration and has a 4 MiB cap.
+Routine checks fetch the saved system and verify its sole partition, then fetch
+that partition. They omit identity discovery and retain a 256 KiB cap per response.
+Cookies are read and stored for each exact API URL so path-scoped sessions work.
+The client validates the returned system and partition relationships, state fields, content
 type and response bounds. It currently accepts exactly one system and one
 partition. The owner explicitly selects them and checks that they match the
 home controlled by the scene widgets. Unsupported or ambiguous responses do
@@ -103,7 +108,7 @@ coloured control.
 Pure and Robolectric tests use invented HTTP responses, inert widgets and
 simulated lifecycle events. They do not contact ADT or operate an alarm.
 Earlier personal-device checks verified the native widget route with a locked
-phone and ADT battery usage Unrestricted. They do not establish v0.22 live-query
+phone and ADT battery usage Unrestricted. They do not establish v0.23 live-query
 compatibility, session longevity or reliable overnight operation. Those require
 separate physical verification.
 
@@ -112,3 +117,8 @@ read-only query at the 30-second boundary. That final attempt has a 10-second
 deadline; it does not retry itself or send an alarm command. Status freshness
 includes the matched query round trip conservatively, so transit time cannot
 extend the displayed observation beyond its lifetime.
+
+Setup failures have closed diagnostic codes containing only a request stage,
+error category and optional HTTP status. They never include cookies, URLs,
+account identifiers, response bodies or exception messages. Starting another
+check, a UI timeout or cancellation replaces the previous diagnostic.

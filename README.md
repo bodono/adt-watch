@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app on a paired Android phone. It is not affiliated with
 or supported by ADT or Alarm.com.
 
-The v0.22 integration uses a read-only ADT website query for status and native
+The v0.23 integration uses a read-only ADT website query for status and native
 ADT scene widgets for alarm requests. This version is being validated; earlier
 personal-device checks do not establish reliability of the new live-query flow.
 

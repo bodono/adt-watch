@@ -5,6 +5,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -16,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import javax.net.ssl.SSLException;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -25,15 +28,21 @@ import org.json.JSONTokener;
 final class AdtPortalClient {
     static final String ORIGIN = "https://www.alarm.com";
     static final int MAX_BODY_BYTES = 256 * 1024;
+    // Identity responses also embed portal configuration and included relationship resources.
+    static final int MAX_IDENTITY_BODY_BYTES = 4 * 1024 * 1024;
     static final long MAX_QUERY_MS = 10_000;
 
     interface Session {
         String cookies();
+        default String cookies(String requestUrl) { return cookies(); }
         String userAgent();
         void storeCookie(String setCookie);
+        default void storeCookie(String responseUrl, String setCookie) { storeCookie(setCookie); }
         default void persist() { }
     }
     enum Status { READY, BUSY, LOGIN_REQUIRED, VERIFY_LOGIN, UNAVAILABLE, UNSUPPORTED, AMBIGUOUS }
+    enum Stage { SESSION, IDENTITIES, SYSTEM, PARTITION }
+    enum Reason { NONE, HTTP, TIMEOUT, DNS, TLS, IO, SCHEMA, RESPONSE_SIZE, COOKIE_FORMAT, SESSION, EMPTY_RESPONSE, CONTENT_TYPE }
 
     static final class Result {
         final Status status;
@@ -42,6 +51,9 @@ final class AdtPortalClient {
         final long elapsedMillis;
         final int actualStateCode, desiredStateCode;
         final Boolean loading;
+        final Stage stage;
+        final Reason reason;
+        final int httpStatus;
         Result(Status status, AlarmStateProtocol.State state, String systemId, String partitionId,
                 String systemLabel, String partitionLabel, long elapsedMillis) {
             this(status, state, systemId, partitionId, systemLabel, partitionLabel, elapsedMillis, -1, -1, null);
@@ -49,10 +61,18 @@ final class AdtPortalClient {
         Result(Status status, AlarmStateProtocol.State state, String systemId, String partitionId,
                 String systemLabel, String partitionLabel, long elapsedMillis, int actualStateCode, int desiredStateCode,
                 Boolean loading) {
+            this(status, state, systemId, partitionId, systemLabel, partitionLabel, elapsedMillis,
+                actualStateCode, desiredStateCode, loading, Stage.SESSION, Reason.NONE, 0);
+        }
+        private Result(Status status, AlarmStateProtocol.State state, String systemId, String partitionId,
+                String systemLabel, String partitionLabel, long elapsedMillis, int actualStateCode, int desiredStateCode,
+                Boolean loading, Stage stage, Reason reason, int httpStatus) {
             this.status = status; this.state = state; this.systemId = systemId; this.partitionId = partitionId;
             this.systemLabel = systemLabel; this.partitionLabel = partitionLabel; this.elapsedMillis = elapsedMillis;
             this.actualStateCode = actualStateCode; this.desiredStateCode = desiredStateCode; this.loading = loading;
+            this.stage = stage; this.reason = reason; this.httpStatus = boundedHttp(httpStatus);
         }
+        String diagnosticCode() { return stage.name() + "/" + reason.name() + (httpStatus == 0 ? "" : "/" + httpStatus); }
         @Override public String toString() { return "ADT portal result: " + status + " (" + elapsedMillis + " ms)"; }
     }
 
@@ -62,10 +82,12 @@ final class AdtPortalClient {
     interface ConnectionFactory { HttpURLConnection open(URL url) throws IOException; }
     static final class Request {
         final String url;
+        final int maxBodyBytes;
         final Map<String, String> headers;
         private Request(String path, Map<String, String> headers) throws Failure {
             if (!validPath(path)) throw new Failure(Status.UNSUPPORTED);
             url = ORIGIN + path;
+            maxBodyBytes = bodyLimit(path);
             this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(headers));
         }
         @Override public String toString() { return "GET ADT portal (session headers redacted)"; }
@@ -83,7 +105,18 @@ final class AdtPortalClient {
     }
     private static final class Failure extends Exception {
         final Status status;
-        Failure(Status status) { super(status.name()); this.status = status; }
+        final Reason reason;
+        Failure(Status status) { this(status, Reason.SCHEMA); }
+        Failure(Status status, Reason reason) { super(status.name()); this.status = status; this.reason = reason; }
+    }
+    private static final class Diagnostic {
+        Stage stage = Stage.SESSION;
+        int http;
+    }
+    private static final class PortalIOException extends IOException {
+        final Reason reason;
+        final int http;
+        PortalIOException(Reason reason, int http) { super(reason.name()); this.reason = reason; this.http = boundedHttp(http); }
     }
 
     private final Session session;
@@ -99,23 +132,40 @@ final class AdtPortalClient {
 
     /** Must be called on a worker thread. All failures discard partial state; there is no cached fallback. */
     Result query(long deadlineElapsed) {
+        return query(null, null, false, deadlineElapsed);
+    }
+
+    /** Routine reads prove membership in the saved system without downloading portal identity configuration. */
+    Result queryBound(String expectedSystemId, String expectedPartitionId, long deadlineElapsed) {
+        return query(expectedSystemId, expectedPartitionId, true, deadlineElapsed);
+    }
+
+    private Result query(String expectedSystemId, String expectedPartitionId, boolean bound, long deadlineElapsed) {
         long started = clock.elapsed();
         long deadline = Math.min(deadlineElapsed, started > Long.MAX_VALUE - MAX_QUERY_MS
                 ? Long.MAX_VALUE : started + MAX_QUERY_MS);
+        Diagnostic diagnostic = new Diagnostic();
         try {
-            if (started < 0 || session == null || deadline <= started) throw new Failure(Status.UNAVAILABLE);
-            JSONObject identities = fetch("/web/api/identities", deadline);
-            JSONArray accounts = array(identities, "data");
-            if (accounts.length() > 1) throw new Failure(Status.AMBIGUOUS);
-            if (accounts.length() != 1) throw new Failure(Status.UNSUPPORTED);
-            JSONObject identity = object(accounts.get(0));
-            requireType(identity, "identity");
-            resourceId(identity.get("id"));
-            JSONObject selected = object(object(object(identity, "relationships"), "selectedSystem"), "data");
-            requireType(selected, "systems/system");
-            String systemId = resourceId(selected.get("id"));
+            if (session == null) throw new Failure(Status.UNAVAILABLE, Reason.SESSION);
+            if (started < 0 || deadline <= started) throw new Failure(Status.UNAVAILABLE, Reason.TIMEOUT);
+            String systemId;
+            if (bound) {
+                systemId = resourceId(expectedSystemId);
+                resourceId(expectedPartitionId);
+            } else {
+                JSONObject identities = fetch("/web/api/identities", deadline, Stage.IDENTITIES, diagnostic);
+                JSONArray accounts = array(identities, "data");
+                if (accounts.length() > 1) throw new Failure(Status.AMBIGUOUS);
+                if (accounts.length() != 1) throw new Failure(Status.UNSUPPORTED);
+                JSONObject identity = object(accounts.get(0));
+                requireType(identity, "identity");
+                resourceId(identity.get("id"));
+                JSONObject selected = object(object(object(identity, "relationships"), "selectedSystem"), "data");
+                requireType(selected, "systems/system");
+                systemId = resourceId(selected.get("id"));
+            }
 
-            JSONObject system = object(fetch("/web/api/systems/systems/" + systemId, deadline), "data");
+            JSONObject system = object(fetch("/web/api/systems/systems/" + systemId, deadline, Stage.SYSTEM, diagnostic), "data");
             requireType(system, "systems/system");
             if (!systemId.equals(resourceId(system.get("id")))) throw new Failure(Status.AMBIGUOUS);
             String systemLabel = label(object(system, "attributes"));
@@ -126,8 +176,9 @@ final class AdtPortalClient {
             JSONObject partitionLink = object(partitions.get(0));
             requireType(partitionLink, "devices/partition");
             String partitionId = partitionId(partitionLink.get("id"));
+            if (bound && !partitionId.equals(expectedPartitionId)) throw new Failure(Status.AMBIGUOUS);
 
-            JSONObject partition = object(fetch("/web/api/devices/partitions/" + partitionId, deadline), "data");
+            JSONObject partition = object(fetch("/web/api/devices/partitions/" + partitionId, deadline, Stage.PARTITION, diagnostic), "data");
             requireType(partition, "devices/partition");
             if (!partitionId.equals(partitionId(partition.get("id")))) throw new Failure(Status.AMBIGUOUS);
             // Some portal versions also include the explicit owning-system relationship.
@@ -150,52 +201,65 @@ final class AdtPortalClient {
                 : actual == 2 ? AlarmStateProtocol.State.ARMED_STAY : AlarmStateProtocol.State.ARMED_AWAY;
             // A different desired state can outlive a failed command; only explicit loading means busy.
             Status status = Boolean.TRUE.equals(loading) ? Status.BUSY : Status.READY;
-            return new Result(status, state, systemId, partitionId, systemLabel, partitionLabel, elapsed(started), actual, desired, loading);
+            return new Result(status, state, systemId, partitionId, systemLabel, partitionLabel, elapsed(started),
+                actual, desired, loading, diagnostic.stage, Reason.NONE, diagnostic.http);
         } catch (Failure failure) {
-            return failed(failure.status, started);
-        } catch (IOException | JSONException | RuntimeException ignored) {
+            return failed(failure.status, started, diagnostic, failure.reason);
+        } catch (IOException failure) {
+            Reason reason = ioReason(failure);
+            if (failure instanceof PortalIOException) {
+                reason = ((PortalIOException) failure).reason;
+                diagnostic.http = ((PortalIOException) failure).http;
+            }
+            return failed(Status.UNAVAILABLE, started, diagnostic, reason);
+        } catch (JSONException | RuntimeException ignored) {
             // Response bodies, server errors, headers and exception text never reach logs or the caller.
-            return failed(ignored instanceof IOException ? Status.UNAVAILABLE : Status.UNSUPPORTED, started);
+            return failed(Status.UNSUPPORTED, started, diagnostic, Reason.SCHEMA);
         } finally {
             // Worker-only disk flush preserves rotated login cookies across process death.
             if (session != null) try { session.persist(); } catch (RuntimeException ignored) { }
         }
     }
 
-    private JSONObject fetch(String path, long deadline) throws Failure, IOException, JSONException {
+    private JSONObject fetch(String path, long deadline, Stage stage, Diagnostic diagnostic) throws Failure, IOException, JSONException {
+        diagnostic.stage = Stage.SESSION; diagnostic.http = 0;
         checkDeadline(deadline);
-        String cookies = session.cookies(), userAgent = session.userAgent();
-        if (!headerValue(cookies, 16_384) || cookies.isEmpty()) throw new Failure(Status.LOGIN_REQUIRED);
+        String cookies = session.cookies(ORIGIN + path), userAgent = session.userAgent();
+        if (!headerValue(cookies, 16_384)) throw new Failure(Status.LOGIN_REQUIRED, cookies == null ? Reason.SESSION : Reason.COOKIE_FORMAT);
+        if (cookies.isEmpty()) throw new Failure(Status.LOGIN_REQUIRED, Reason.SESSION);
         String ajaxKey = null;
         for (String cookie : cookies.split(";")) {
             int equals = cookie.indexOf('=');
             if (equals >= 0 && "afg".equals(cookie.substring(0, equals).trim())) {
-                if (ajaxKey != null) throw new Failure(Status.VERIFY_LOGIN);
+                if (ajaxKey != null) throw new Failure(Status.VERIFY_LOGIN, Reason.COOKIE_FORMAT);
                 ajaxKey = cookie.substring(equals + 1).trim();
             }
         }
-        if (!headerValue(ajaxKey, 2048) || ajaxKey.isEmpty()) throw new Failure(Status.LOGIN_REQUIRED);
-        if (!headerValue(userAgent, 1024) || userAgent.isEmpty()) throw new Failure(Status.UNSUPPORTED);
+        if (!headerValue(ajaxKey, 2048) || ajaxKey.isEmpty()) throw new Failure(Status.LOGIN_REQUIRED, Reason.SESSION);
+        if (!headerValue(userAgent, 1024) || userAgent.isEmpty()) throw new Failure(Status.UNSUPPORTED, Reason.SESSION);
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Accept", "application/vnd.api+json"); headers.put("Cookie", cookies);
         headers.put("ajaxrequestuniquekey", ajaxKey); headers.put("User-Agent", userAgent);
         headers.put("Referer", ORIGIN + "/web/system/home");
         headers.put("Cache-Control", "no-cache, no-store"); headers.put("Pragma", "no-cache");
+        diagnostic.stage = stage;
         Response response = transport.get(new Request(path, headers), deadline);
+        if (response != null) diagnostic.http = boundedHttp(response.code);
         checkDeadline(deadline);
-        if (response == null || response.setCookies.size() > 16) throw new Failure(Status.UNAVAILABLE);
+        if (response == null) throw new Failure(Status.UNAVAILABLE, Reason.EMPTY_RESPONSE);
+        if (response.setCookies.size() > 16) throw new Failure(Status.UNAVAILABLE, Reason.COOKIE_FORMAT);
         for (String cookie : response.setCookies) {
-            if (!headerValue(cookie, 8192)) throw new Failure(Status.UNAVAILABLE);
-            session.storeCookie(cookie);
+            if (!headerValue(cookie, 8192)) throw new Failure(Status.UNAVAILABLE, Reason.COOKIE_FORMAT);
+            session.storeCookie(ORIGIN + path, cookie);
         }
-        if (response.code == 401 || response.code >= 300 && response.code < 400) throw new Failure(Status.LOGIN_REQUIRED);
-        if (response.code == 403 || response.code == 423) throw new Failure(Status.VERIFY_LOGIN);
-        if (response.code != 200) throw new Failure(Status.UNAVAILABLE);
-        String type = response.contentType == null ? "" : response.contentType.toLowerCase(Locale.ROOT).split(";", 2)[0].trim();
-        if ("text/html".equals(type)) throw new Failure(Status.LOGIN_REQUIRED);
-        if (!"application/json".equals(type) && !"application/vnd.api+json".equals(type)) throw new Failure(Status.UNSUPPORTED);
-        if (response.body == null || response.body.length == 0 || response.body.length > MAX_BODY_BYTES)
-            throw new Failure(Status.UNAVAILABLE);
+        if (response.code == 401 || response.code >= 300 && response.code < 400) throw new Failure(Status.LOGIN_REQUIRED, Reason.HTTP);
+        if (response.code == 403 || response.code == 409 || response.code == 423) throw new Failure(Status.VERIFY_LOGIN, Reason.HTTP);
+        if (response.code != 200) throw new Failure(Status.UNAVAILABLE, Reason.HTTP);
+        String type = mediaType(response.contentType);
+        if ("text/html".equals(type)) throw new Failure(Status.LOGIN_REQUIRED, Reason.CONTENT_TYPE);
+        if (!jsonType(type)) throw new Failure(Status.UNSUPPORTED, Reason.CONTENT_TYPE);
+        if (response.body == null || response.body.length == 0) throw new Failure(Status.UNAVAILABLE, Reason.EMPTY_RESPONSE);
+        if (response.body.length > bodyLimit(path)) throw new Failure(Status.UNAVAILABLE, Reason.RESPONSE_SIZE);
         String body;
         try {
             body = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
@@ -207,13 +271,28 @@ final class AdtPortalClient {
         return document;
     }
 
-    private Result failed(Status status, long started) {
-        return new Result(status, AlarmStateProtocol.State.UNKNOWN, "", "", "", "", elapsed(started));
+    private Result failed(Status status, long started, Diagnostic diagnostic, Reason reason) {
+        return new Result(status, AlarmStateProtocol.State.UNKNOWN, "", "", "", "", elapsed(started),
+            -1, -1, null, diagnostic.stage, reason, diagnostic.http);
+    }
+    private static int boundedHttp(int status) { return status >= 100 && status <= 599 ? status : 0; }
+    private static int bodyLimit(String path) {
+        return "/web/api/identities".equals(path) ? MAX_IDENTITY_BODY_BYTES : MAX_BODY_BYTES;
+    }
+    private static String mediaType(String type) {
+        return type == null ? "" : type.toLowerCase(Locale.ROOT).split(";", 2)[0].trim();
+    }
+    private static boolean jsonType(String type) {
+        return "application/json".equals(type) || "application/vnd.api+json".equals(type);
+    }
+    private static Reason ioReason(IOException failure) {
+        return failure instanceof SocketTimeoutException ? Reason.TIMEOUT
+            : failure instanceof UnknownHostException ? Reason.DNS : failure instanceof SSLException ? Reason.TLS : Reason.IO;
     }
     private long elapsed(long started) { return Math.max(0, clock.elapsed() - started); }
     private void checkDeadline(long deadline) throws Failure {
         long now = clock.elapsed();
-        if (now < 0 || now >= deadline) throw new Failure(Status.UNAVAILABLE);
+        if (now < 0 || now >= deadline) throw new Failure(Status.UNAVAILABLE, Reason.TIMEOUT);
     }
     private static boolean validPath(String path) {
         return "/web/api/identities".equals(path)
@@ -277,37 +356,42 @@ final class AdtPortalClient {
                     || url.getUserInfo() != null || url.getQuery() != null || url.getRef() != null || !validPath(url.getPath()))
                 throw new IOException("Invalid portal path");
             HttpURLConnection connection = connections.open(url);
+            int code = 0;
             try {
                 connection.setRequestMethod("GET"); connection.setInstanceFollowRedirects(false);
                 connection.setDoOutput(false); connection.setUseCaches(false);
                 connection.setConnectTimeout(timeout(deadlineElapsed)); connection.setReadTimeout(timeout(deadlineElapsed));
                 for (Map.Entry<String, String> header : request.headers.entrySet()) connection.setRequestProperty(header.getKey(), header.getValue());
-                int code = connection.getResponseCode();
+                code = connection.getResponseCode();
                 List<String> cookies = new ArrayList<>();
                 for (Map.Entry<String, List<String>> header : connection.getHeaderFields().entrySet())
                     if (header.getKey() != null && "Set-Cookie".equalsIgnoreCase(header.getKey()) && header.getValue() != null)
                         cookies.addAll(header.getValue());
                 byte[] body = new byte[0];
-                if (code == 200) {
-                    if (connection.getContentLengthLong() > MAX_BODY_BYTES) throw new IOException("Portal response too large");
+                String contentType = connection.getContentType();
+                // Login/error HTML is classified from its media type, without downloading its body.
+                if (code == 200 && jsonType(mediaType(contentType))) {
+                    if (connection.getContentLengthLong() > request.maxBodyBytes) throw new PortalIOException(Reason.RESPONSE_SIZE, code);
                     try (InputStream input = connection.getInputStream(); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
                         byte[] chunk = new byte[4096];
                         while (true) {
                             connection.setReadTimeout(timeout(deadlineElapsed));
                             int count = input.read(chunk);
                             if (count < 0) break;
-                            if (bytes.size() > MAX_BODY_BYTES - count) throw new IOException("Portal response too large");
+                            if (bytes.size() > request.maxBodyBytes - count) throw new PortalIOException(Reason.RESPONSE_SIZE, code);
                             bytes.write(chunk, 0, count);
                         }
                         body = bytes.toByteArray();
                     }
                 }
-                return new Response(code, connection.getContentType(), body, cookies);
-            } finally { connection.disconnect(); }
+                return new Response(code, contentType, body, cookies);
+            } catch (PortalIOException failure) { throw failure; }
+            catch (IOException failure) { throw new PortalIOException(ioReason(failure), code); }
+            finally { connection.disconnect(); }
         }
         private int timeout(long deadline) throws IOException {
             long remaining = deadline - clock.elapsed();
-            if (remaining <= 0) throw new IOException("Portal request expired");
+            if (remaining <= 0) throw new SocketTimeoutException("Portal request expired");
             return (int) Math.min(3000, remaining);
         }
     }
