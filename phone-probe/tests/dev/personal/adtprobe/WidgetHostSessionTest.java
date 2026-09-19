@@ -67,7 +67,7 @@ public final class WidgetHostSessionTest {
             @Override public void onReceive(Context ignored, Intent intent) { received++; }
         };
         context.registerReceiver(receiver, new IntentFilter(ACTION), Context.RECEIVER_NOT_EXPORTED);
-        startSession(AlarmAction.ARM_STAY, WidgetHostSession.REVIEWED_LABEL);
+        startSession(AlarmAction.ARM_STAY, AlarmAction.ARM_STAY.widgetLabel());
     }
 
     private void startSession(AlarmAction action, String label) throws Exception {
@@ -104,14 +104,14 @@ public final class WidgetHostSessionTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals(1, received);
         assertTrue(session.status().contains("unverified"));
-        render(android.R.layout.simple_list_item_1, WidgetHostSession.REVIEWED_LABEL);
+        render(android.R.layout.simple_list_item_1, AlarmAction.ARM_STAY.widgetLabel());
         assertFalse("A later idle update cannot restore a consumed authorization", session.isReady());
         assertFalse(session.activateOnce(session.renderGeneration()));
     }
 
     @Test public void evenIdenticalRemoteViewsReapplyInvalidatesThePreviousGeneration() {
         long old = session.renderGeneration();
-        render(android.R.layout.simple_list_item_1, WidgetHostSession.REVIEWED_LABEL);
+        render(android.R.layout.simple_list_item_1, AlarmAction.ARM_STAY.widgetLabel());
         assertTrue(session.renderGeneration() > old);
         assertFalse(session.activateOnce(old));
         assertTrue(session.diagnostics(), session.activateOnce(session.renderGeneration()));
@@ -120,7 +120,7 @@ public final class WidgetHostSessionTest {
     }
 
     @Test public void wrongLayoutOrLabelCannotActivateEvenWithALiveNativeClickListener() {
-        render(android.R.layout.simple_list_item_2, WidgetHostSession.REVIEWED_LABEL);
+        render(android.R.layout.simple_list_item_2, AlarmAction.ARM_STAY.widgetLabel());
         assertFalse(session.isReady());
         assertFalse(session.activateOnce(session.renderGeneration()));
         render(android.R.layout.simple_list_item_1, "Disarm");

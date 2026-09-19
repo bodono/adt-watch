@@ -73,7 +73,7 @@ def verify(name, launcher, permissions):
         require('dev.personal.adtprobe.ArmExperimentService' in manifest)
         require('dev.personal.adtprobe.ArmExperimentActivity' in manifest)
         require('com.google.android.gms.wearable.MESSAGE_RECEIVED' in manifest)
-        require('/adt-probe/v1/ping' in manifest)
+        require('/adt-probe/v1/ping' not in manifest, 'The retired ping path must not be registered')
         require('/adt-probe/v2/alarm/prepare' in manifest and '/adt-probe/v2/alarm/commit' in manifest)
         require('/adt-probe/v3/toggle/prepare' in manifest and '/adt-probe/v3/state/query' in manifest)
     else:

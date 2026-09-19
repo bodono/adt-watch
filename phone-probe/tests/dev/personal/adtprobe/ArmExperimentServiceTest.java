@@ -94,9 +94,9 @@ public final class ArmExperimentServiceTest {
 
     @Test public void incomingPrepareAndCommitNeverStartAnExperimentService() throws Exception {
         ArmExperimentService.receive(message(ArmExperimentProtocol.PREPARE_PATH,
-            ArmExperimentProtocol.encodePrepare(REQUEST)));
+            ArmExperimentProtocol.encodePrepare(AlarmAction.ARM_STAY, REQUEST)));
         ArmExperimentService.receive(message(ArmExperimentProtocol.COMMIT_PATH,
-            ArmExperimentProtocol.encodeCommit(REQUEST, CHALLENGE)));
+            ArmExperimentProtocol.encodeCommit(AlarmAction.ARM_STAY, REQUEST, CHALLENGE)));
         ArmExperimentService.receive(null);
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertFalse(ArmExperimentService.isRunning());
@@ -120,7 +120,7 @@ public final class ArmExperimentServiceTest {
         assertEquals(Service.START_NOT_STICKY, service.onStartCommand(forgedStart(), 0, 1));
         assertRejectedWithoutHost();
         ArmExperimentService.receive(message(ArmExperimentProtocol.COMMIT_PATH,
-            ArmExperimentProtocol.encodeCommit(REQUEST, CHALLENGE)));
+            ArmExperimentProtocol.encodeCommit(AlarmAction.ARM_STAY, REQUEST, CHALLENGE)));
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertNull(Shadows.shadowOf(context).getNextStartedService());
     }
@@ -148,9 +148,9 @@ public final class ArmExperimentServiceTest {
         assertNotNull("Exercise a real passive host, rather than a rejected service", passiveHost);
 
         ArmExperimentService.receive(message(ArmExperimentProtocol.PREPARE_PATH,
-            ArmExperimentProtocol.encodePrepare(REQUEST)));
+            ArmExperimentProtocol.encodePrepare(AlarmAction.ARM_STAY, REQUEST)));
         ArmExperimentService.receive(message(ArmExperimentProtocol.COMMIT_PATH,
-            ArmExperimentProtocol.encodeCommit(REQUEST, CHALLENGE)));
+            ArmExperimentProtocol.encodeCommit(AlarmAction.ARM_STAY, REQUEST, CHALLENGE)));
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals(Boolean.FALSE, observe(service, "authorised"));
         assertEquals(Boolean.FALSE, observe(service, "prepareInFlight"));

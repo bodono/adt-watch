@@ -19,12 +19,10 @@ import android.widget.TextView;
 /** Setup only. This screen never authorizes or schedules an alarm command. */
 public final class MainActivity extends Activity {
     private LinearLayout column;
-    private TextView linkStatus;
     private TextView alarmStatus;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshTick = new Runnable() {
         @Override public void run() {
-            if (linkStatus != null) linkStatus.setText(WatchLink.status(MainActivity.this));
             if (alarmStatus != null) alarmStatus.setText(PhoneAlarmState.setupStatus(MainActivity.this));
             handler.postDelayed(this, 1500);
         }
