@@ -196,6 +196,32 @@ public final class ToggleServiceTest {
         assertFalse(PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
     }
 
+    @Test public void tickValidationIsCachedForASecondButActivationRechecksSetupItself() {
+        create(queue()); installInertReadyHost(); setChallenge();
+        assertEquals(Boolean.TRUE, ReflectionHelpers.callInstanceMethod(service, "live"));
+        assertTrue(RoutineAccess.disable(context));
+        assertEquals("Within the validation interval the cached verdict stands", Boolean.TRUE,
+            ReflectionHelpers.callInstanceMethod(service, "live"));
+        invokeCommit();
+        assertEquals("The activation path re-checks setup regardless of the tick cache", 0, clicks);
+        assertEquals("The one-shot is reserved before the final checks, without entering the click",
+            Boolean.TRUE, member(inertHost, "consumed"));
+        assertEquals(Boolean.FALSE, member(service, "authorised"));
+        assertFalse("A rejected commit does not consume the displayed revision", PhoneAlarmState.snapshot(context).pending);
+    }
+
+    @Test public void tickValidationExpiresAfterASecondAndCancelsAChangedSession() {
+        create(queue());
+        assertEquals(Boolean.TRUE, ReflectionHelpers.callInstanceMethod(service, "live"));
+        assertTrue(RoutineAccess.disable(context));
+        ShadowSystemClock.advanceBy(Duration.ofMillis(999));
+        assertEquals(Boolean.TRUE, ReflectionHelpers.callInstanceMethod(service, "live"));
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1));
+        assertEquals(Boolean.FALSE, ReflectionHelpers.callInstanceMethod(service, "live"));
+        assertEquals(Boolean.TRUE, member(service, "stopped"));
+        assertTrue(ArmExperimentService.status(context).contains("access or widget setup changed"));
+    }
+
     @Test public void stateChangeDuringFinalWidgetValidationBlocksNativeActivation() {
         create(queue()); installInertReadyHost(); setChallenge();
         validationSideEffect = () -> fresh(AlarmStateProtocol.State.ARMED_STAY);

@@ -39,6 +39,7 @@ public final class ArmExperimentService extends Service {
     private static final long AUTHORISED_MS = 120_000;
     private static final long ROUTINE_MS = 30_000;
     private static final long RESULT_GRACE_MS = 2_000;
+    private static final long VALIDATION_INTERVAL_MS = 1_000;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final RoutinePrepareReplayGuard RECENT_PREPARES = new RoutinePrepareReplayGuard();
     private static volatile ArmExperimentService active;
@@ -74,6 +75,7 @@ public final class ArmExperimentService extends Service {
     private Boolean lastLocked;
     private long dispatchElapsed = -1;
     private long dispatchWall = -1;
+    private long validatedAt = -1;
 
     private void runCallback(Runnable command) {
         if (stopped) return;
@@ -360,12 +362,22 @@ public final class ArmExperimentService extends Service {
 
     private boolean live() {
         if (stopped || finishing || active != this) return false;
-        if (SystemClock.elapsedRealtime() >= sessionUntil) {
+        long now = SystemClock.elapsedRealtime();
+        if (now >= sessionUntil) {
             stopNow(armLease ? "Experiment expired. No further widget request is authorized."
                 : passiveReadyLocked ? "Passive check ended: the widget was ready while the phone was locked. This check did not activate a scene."
                 : "Passive check ended without confirmed locked-phone readiness. This check did not activate a scene.");
             return false;
         }
+        if (WidgetSetupActivity.hasListeningHost()) {
+            stopNow("Experiment canceled: widget setup took ownership of the host.");
+            return false;
+        }
+        // Setup and reported-state validation cost dozens of binder calls, and the 250ms tick
+        // reached here twice per cycle. Re-validate at most once a second; commit() re-checks
+        // setup and consumes the state revision itself, so activation never relies on this cache.
+        if (validatedAt >= 0 && now >= validatedAt && now - validatedAt < VALIDATION_INTERVAL_MS) return true;
+        validatedAt = now;
         if (grant != null && grant.routine != null && !RoutineAccess.stillValid(this, grant.routine)) {
             stopNow("Watch request canceled: access or widget setup changed.");
             return false;
@@ -374,10 +386,6 @@ public final class ArmExperimentService extends Service {
                 && !PhoneAlarmState.matches(this, grant.toggleRevision, action)) {
             PhoneStateLink.publish(this);
             stopNow("Watch request canceled: ADT's reported state changed or became unavailable.");
-            return false;
-        }
-        if (WidgetSetupActivity.hasListeningHost()) {
-            stopNow("Experiment canceled: widget setup took ownership of the host.");
             return false;
         }
         return true;
@@ -412,7 +420,7 @@ public final class ArmExperimentService extends Service {
                     rejectChallenge("Arm experiment challenge expired; no further request is authorized.");
                     return;
                 }
-                advancePrepare();
+                advancePrepare(readySnapshot);
                 if (stopped || finishing) return;
                 refreshStatus();
                 handler.postDelayed(this, 250);
@@ -454,7 +462,10 @@ public final class ArmExperimentService extends Service {
         }
     }
 
-    private void advancePrepare() {
+    private void advancePrepare() { advancePrepare(host != null && host.isReady()); }
+
+    /** The tick passes its own readiness snapshot, so the four-binder-call host check runs once per cycle. */
+    private void advancePrepare(boolean widgetReady) {
         if (!readinessWait.hasRequest()) return;
         if (!live() || !authorised) { readinessWait.clear(); return; }
         if (!readinessWait.isFresh(SystemClock.elapsedRealtime())) {
@@ -466,7 +477,7 @@ public final class ArmExperimentService extends Service {
             return;
         }
         if (challengeIssued || commitInFlight) return;
-        if (!readinessWait.canProceed(boundNode, host != null && host.isReady(),
+        if (!readinessWait.canProceed(boundNode, widgetReady,
                 host == null ? -1 : host.renderGeneration(), fullyLocked(), SystemClock.elapsedRealtime())) {
             if (!readinessWait.hasRequest())
                 stopNow("Experiment readiness wait expired. No alarm request was sent.");
@@ -474,9 +485,11 @@ public final class ArmExperimentService extends Service {
         }
         if (prepareInFlight) return;
         prepareInFlight = true;
-        String source = readinessWait.source();
-        String request = readinessWait.requestId();
-        checkCurrentNode(source, () -> prepare(source, request));
+        // discoverNode() verified the single connected watch at start and stops the session on a
+        // mismatch; the request's source must still equal boundNode; and commit() re-verifies the
+        // node before the only activation. A second Play Services round trip here only delayed the
+        // challenge, so issue it directly.
+        prepare(readinessWait.source(), readinessWait.requestId());
     }
 
     private void checkCurrentNode(String source, Runnable continuation) {
