@@ -55,24 +55,28 @@ public final class MainActivity extends Activity {
             scroll.setPadding(edges.left, edges.top, edges.right, edges.bottom); return insets;
         });
         text("ADT Watch Setup", 28, Color.WHITE);
-        text("Personal app · v0.21", 15, Color.LTGRAY);
+        text("Personal app · v0.22", 15, Color.LTGRAY);
         text("One-tap watch control", 21, Color.WHITE);
         text("Red means ADT reported Armed: tap to Disarm. Green means ADT reported Disarmed: tap to Arm Stay. "
             + "The watch also has an ADT Watch tile you can add to its swipeable tiles.", 16, Color.LTGRAY);
+        text("Set up ADT live status below: sign in to the official ADT page and choose the same home as both scene widgets. "
+            + "This is a separate sign-in from the ADT app. Refresh queries ADT's actual state without operating the alarm. "
+            + "If the website session expires, sign in again here.", 15, Color.LTGRAY);
         alarmStatus = text(PhoneAlarmState.setupStatus(this), 15, Color.rgb(155, 212, 229));
-        button("Allow ADT alarm status…", view -> {
+        button("Watch control access…", view ->
+            startActivity(new Intent(this, RoutineSetupActivity.class)));
+        button("Set up ADT live status…", view ->
+            startActivity(new Intent(this, AdtPortalSetupActivity.class)));
+        button("Allow ADT refresh hints…", view -> {
             Intent settings = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
                 .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
                     new ComponentName(this, AdtStateListener.class).flattenToString());
             try { startActivity(settings); }
             catch (RuntimeException e) { startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)); }
         });
-        text("Android's notification access lets this helper read ADT's alarm reports. It keeps only the reported state and timing. "
-            + "Grey means no usable state report is available. The colour changes after ADT reports the result.", 15, Color.LTGRAY);
-        button("Watch control access…", view ->
-            startActivity(new Intent(this, RoutineSetupActivity.class)));
-        button("Recover missing status…", view ->
-            startActivity(new Intent(this, StateRecoveryActivity.class)));
+        text("Notification access is optional. ADT notifications only prompt a live status query; "
+            + "they do not supply the alarm state. Grey means fresh, usable ADT status is unavailable or a request is in progress.",
+            15, Color.LTGRAY);
         button("Open ADT", view -> {
             try { startActivity(Probe.neutralIntent()); }
             catch (Exception e) {

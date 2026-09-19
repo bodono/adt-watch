@@ -223,9 +223,20 @@ public final class ArmExperimentService extends Service {
             if (toggleRevision != null) sendDeclined(app, source, message, AlarmStateProtocol.DeclineReason.UNAVAILABLE);
             return;
         }
-        if (toggleRevision != null && !PhoneAlarmState.matches(app, toggleRevision, message.action)) {
-            sendDeclined(app, source, message, AlarmStateProtocol.DeclineReason.STATE_CHANGED);
-            PhoneStateLink.publish(app); return;
+        if (toggleRevision != null) {
+            PhoneAlarmState.Snapshot state = PhoneAlarmState.snapshot(app);
+            AlarmStateProtocol.DeclineReason reason = null;
+            if (state.availability != AlarmStateProtocol.Availability.READY)
+                reason = AlarmStateProtocol.DeclineReason.UNAVAILABLE;
+            else if (message.action == AlarmAction.DISARM && state.state == AlarmStateProtocol.State.DISARMED
+                    || message.action == AlarmAction.ARM_STAY && state.state == AlarmStateProtocol.State.ARMED_STAY)
+                reason = AlarmStateProtocol.DeclineReason.ALREADY_SATISFIED;
+            else if (!PhoneAlarmState.matches(app, toggleRevision, message.action))
+                reason = AlarmStateProtocol.DeclineReason.STATE_CHANGED;
+            if (reason != null) {
+                sendDeclined(app, source, message, reason);
+                PhoneStateLink.publish(app); return;
+            }
         }
         if (!RECENT_PREPARES.admit(source, message.action, message.requestId, SystemClock.elapsedRealtime())) return;
         discardPending();

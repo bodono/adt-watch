@@ -23,7 +23,7 @@ try:
 except RuntimeError as error:
     parser.error(str(error))
 PACKAGE = 'dev.personal.adtprobe'
-RETIRED = ['LockedArmTestService', 'LockedProbeService', 'NeutralCheckActivity', 'shortcuts.json']
+RETIRED = ['LockedArmTestService', 'LockedProbeService', 'NeutralCheckActivity', 'StateRecoveryActivity', 'shortcuts.json']
 
 
 def require(condition, message='Packaged APK contract does not match the expected configuration'):
@@ -51,7 +51,7 @@ def signer(apk):
 def verify(name, launcher, permissions):
     apk = ROOT / 'build' / (name + '.apk')
     badging = run('aapt2', 'dump', 'badging', apk)
-    require("package: name='dev.personal.adtprobe' versionCode='21' versionName='0.21'" in badging)
+    require("package: name='dev.personal.adtprobe' versionCode='22' versionName='0.22'" in badging)
     require("minSdkVersion:'30'" in badging and "targetSdkVersion:'36'" in badging)
     require("launchable-activity: name='" + PACKAGE + '.' + launcher + "'" in badging)
     actual_permissions = set(re.findall(r"^uses-permission: name='([^']+)'", badging, re.M))
@@ -94,7 +94,7 @@ def verify(name, launcher, permissions):
 
 
 phone = verify('phone-probe', 'MainActivity', {
-    'android.permission.BIND_APPWIDGET', 'android.permission.BLUETOOTH',
+    'android.permission.INTERNET', 'android.permission.BIND_APPWIDGET', 'android.permission.BLUETOOTH',
     'android.permission.BLUETOOTH_CONNECT', 'android.permission.FOREGROUND_SERVICE',
     'android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND'})
 watch = verify('watch-probe', 'WatchActivity', {'dev.personal.adtprobe.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'})
@@ -108,7 +108,7 @@ if previous is not None:
         raise RuntimeError('The explicitly configured signing reference APK is missing')
     if signer(previous) != phone['signer_sha256']:
         raise RuntimeError('APK signing identity differs from the upgrade reference')
-report = {'version': '0.21', 'device_access': False, 'artifacts': [phone, watch],
+report = {'version': '0.22', 'device_access': False, 'artifacts': [phone, watch],
           'same_phone_watch_signer': True, 'upgrade_signer_checked': previous is not None,
           'same_signer_as_installed_v08': True if previous == legacy_reference else None,
           'no_assets_or_retired_code': True}

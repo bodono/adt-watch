@@ -121,7 +121,10 @@ public final class WatchActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (AlarmStateProtocol.DECLINED_PATH.equals(event.getPath()) && !commandSent
                 && started.acceptDeclined(event.getData(), event.getSourceNodeId(), now)) {
-            endAttempt("Not sent: phone status changed or control unavailable.", false);
+            AlarmStateProtocol.Declined declined = AlarmStateProtocol.parseDeclined(event.getData());
+            endAttempt(declined != null && declined.reason == AlarmStateProtocol.DeclineReason.ALREADY_SATISFIED
+                    ? "Already in the requested state. Refreshing…"
+                    : "Not sent: phone status changed or control unavailable.", false);
         } else if (ArmExperimentProtocol.CHALLENGE_PATH.equals(event.getPath())
                 && started.acceptChallenge(event.getData(), event.getSourceNodeId(), now)) {
             if (!WatchAlarmStore.stillCurrent(this, selection)) { endAttempt("Status changed. No action sent.", false); return; }

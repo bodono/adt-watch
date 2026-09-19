@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -36,7 +37,7 @@ import static org.junit.Assert.*;
 /**
  * Production Activity/store/protocol with an inert Sender and real button touch dispatch.
  * Readiness flags stand in for GMS listener registration; production admission seeds reports.
- * Query transport is never drained: tests supply its nonce-matched answers directly instead.
+ * GMS query tasks are never drained: tests supply nonce-matched answers directly, or use an inert transport.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 35, qualifiers = "w240dp-h240dp-round-mdpi")
@@ -226,7 +227,7 @@ public final class WatchActivityFlowTest {
         assertTrue(controls().alarmButton.getText().toString().contains(WatchAlarmStore.read(context).detail));
 
         advance(2_001);
-        report(AlarmStateProtocol.State.DISARMED);
+        report(AlarmStateProtocol.State.DISARMED, selected.request);
         render();
         assertEquals(AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
         assertTrue(controls().alarmButton.isEnabled());
@@ -255,7 +256,7 @@ public final class WatchActivityFlowTest {
             Context.MODE_PRIVATE), "contactReceived");
         stopQueryTransport();
         Shadows.shadowOf(Looper.getMainLooper()).idle();
-        assertTrue(controls().alarmButton.getText().toString().contains("Allow ADT status access"));
+        assertTrue(controls().alarmButton.getText().toString().contains("Sign in to ADT"));
         assertFalse(controls().alarmButton.isEnabled());
         assertEquals(1, sent.size());
         assertEquals(0, commits());
@@ -290,6 +291,51 @@ public final class WatchActivityFlowTest {
             assertEquals(1, sent.size());
             assertNull(attempt());
             assertNull(WatchAlarmStore.consume(context, original.revision, WatchAlarmStore.read(context).action));
+        }
+    }
+
+    @Test public void alreadySatisfiedPreflightRefreshesWithoutCommittingOrReversingTheTap() {
+        WatchAlarmStore.StatusTransport originalTransport = ReflectionHelpers.getStaticField(WatchAlarmStore.class, "transport");
+        ReflectionHelpers.setStaticField(WatchAlarmStore.class, "transport", new WatchAlarmStore.StatusTransport() {
+            @Override public void discover(Context ignored, Consumer<String> found, Runnable failed) { found.accept(PHONE); }
+            @Override public void query(Context ignored, String phone, String nonce, Runnable failed) { }
+        });
+        try { for (AlarmAction action : AlarmAction.values()) {
+            closeActivity(); resetStore(); sent.clear();
+            WatchAlarmStore.ViewState original = report(action == AlarmAction.DISARM
+                    ? AlarmStateProtocol.State.ARMED_STAY : AlarmStateProtocol.State.DISARMED);
+            mount(new Intent(Intent.ACTION_MAIN), null, true);
+            tap();
+            AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+
+            handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
+                    action, selected.request, AlarmStateProtocol.DeclineReason.ALREADY_SATISFIED).encode());
+            assertNull(attempt());
+            assertFalse(stored().getBoolean("busy", false));
+            assertFalse(stored().getBoolean("awaiting", false));
+            assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
+            // Run only the inert status transport so the posted recovery can start.
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertTrue("Already satisfied still fetches the current ADT state", WatchAlarmStore.isRefreshing());
+            assertEquals(1, sent.size());
+            assertEquals(0, commits());
+            stopQueryTransport();
+
+            advance(2_001);
+            report(action == AlarmAction.DISARM
+                    ? AlarmStateProtocol.State.DISARMED : AlarmStateProtocol.State.ARMED_STAY);
+            render();
+            assertEquals(action == AlarmAction.DISARM ? AlarmAction.ARM_STAY : AlarmAction.DISARM,
+                    WatchAlarmStore.read(context).action);
+            handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+                    ArmExperimentProtocol.encodeChallenge(action, selected.request, UUID.randomUUID().toString()));
+            assertNull("A late challenge cannot revive the already satisfied tap", attempt());
+            assertEquals("Showing the inverse action after refresh cannot send it", 1, sent.size());
+            assertEquals(0, commits());
+            assertNull(WatchAlarmStore.consume(context, original.revision, action));
+        } } finally {
+            stopQueryTransport();
+            ReflectionHelpers.setStaticField(WatchAlarmStore.class, "transport", originalTransport);
         }
     }
 
@@ -413,11 +459,16 @@ public final class WatchActivityFlowTest {
     }
 
     private WatchAlarmStore.ViewState report(AlarmStateProtocol.State state) {
+        return report(state, "-");
+    }
+
+    private WatchAlarmStore.ViewState report(AlarmStateProtocol.State state, String completedRequest) {
         WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
         assertNotNull("Inert report needs a fresh production query", query);
         assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
         assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce, state,
-            AlarmStateProtocol.Availability.READY, UUID.randomUUID().toString(), 0), now(), BOOT));
+            AlarmStateProtocol.Availability.READY, UUID.randomUUID().toString(), 0, completedRequest,
+            AlarmStateProtocol.Evidence.ADT_QUERY, UUID.randomUUID().toString()), now(), BOOT));
         return WatchAlarmStore.read(context);
     }
 

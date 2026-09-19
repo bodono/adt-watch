@@ -1,376 +1,227 @@
 package dev.personal.adtprobe;
 
-import android.app.Activity;
-import android.app.Notification;
-import android.app.NotificationManager;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.content.pm.PackageInfo;
-import android.service.notification.StatusBarNotification;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
-import java.time.format.ResolverStyle;
-import java.util.Locale;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.provider.Settings;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
-/** Latest exact ADT report or explicit phone check, never an inferred result of sending a scene. */
+/** ADT's authenticated reported state is the only authority. Notifications are refresh hints. */
 final class PhoneAlarmState {
     static final String ADT_PACKAGE = "com.adtuk.adtukalarm";
-    static final String PREFERENCES = "reported_alarm_state";
-    static final long MAX_AGE_MILLIS = 24 * 60 * 60 * 1000L;
-    static final long COMMAND_CONFIRMATION_MILLIS = 30_000;
-    private static final Pattern TITLE = Pattern.compile("^([^\\r\\n()]+) (Disarmed|Armed Stay|Armed Away) \\(([^\\r\\n()]+)\\)$");
-    private static final Pattern BODY = Pattern.compile("^([^\\r\\n]+?): ([^\\r\\n()]+) was (Disarmed|Armed Stay|Armed Away) at ([0-9]{2}:[0-9]{2}) on ([0-9]{2}/[0-9]{2}/[0-9]{4})\\. \\(([^\\r\\n()]+)\\)$");
-    private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd/MM/uuuu HH:mm", Locale.UK)
-        .withResolverStyle(ResolverStyle.STRICT);
-    private static boolean connected, reconciled, connectionHasLatest, storageFailed;
-
+    static final String PREFERENCES = "live_adt_state";
+    static final long COMMAND_CONFIRMATION_MILLIS = AdtLiveLedger.PENDING_LIMIT_MS;
+    private static final long QUERY_MS = 8_000;
+    private static final ReentrantLock QUERY_LOCK = new ReentrantLock();
+    private static final ScheduledExecutorService READS = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "ADT status reads"); thread.setDaemon(true); return thread;
+    });
+    private static final AtomicBoolean HINT_QUEUED = new AtomicBoolean();
+    interface Schedule { void after(Runnable action, long delayMillis); }
+    static Schedule scheduleOperation = (action, delay) -> READS.schedule(action, delay, TimeUnit.MILLISECONDS);
+    private static boolean storageFailed;
+    interface Query { AdtPortalClient.Result query(Context context, long deadline); }
+    static Query queryOperation = PhoneAlarmState::queryPortal;
     private PhoneAlarmState() { }
 
     static final class Snapshot {
         final AlarmStateProtocol.State state;
-        final String revision, completedRequest;
+        final String revision, completedRequest, observationId;
         final long ageMillis;
         final AlarmStateProtocol.Availability availability;
-        final AlarmStateProtocol.Evidence evidence;
-        Snapshot(AlarmStateProtocol.State state, String revision, long ageMillis, AlarmStateProtocol.Availability availability,
-                String completedRequest, AlarmStateProtocol.Evidence evidence) {
-            this.state = state; this.revision = revision; this.ageMillis = ageMillis; this.availability = availability;
-            this.completedRequest = completedRequest; this.evidence = evidence;
+        final AlarmStateProtocol.Evidence evidence = AlarmStateProtocol.Evidence.ADT_QUERY;
+        final boolean pending;
+        Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure) {
+            state = value != null && failure == null ? value.state : AlarmStateProtocol.State.UNKNOWN;
+            revision = value == null ? "-" : value.revision;
+            observationId = value == null ? "-" : value.observationId;
+            completedRequest = value == null ? "-" : value.completedRequest;
+            ageMillis = value == null ? 0 : value.observationAgeMillis;
+            availability = failure != null ? failure : value.availability;
+            pending = value != null && value.pending;
         }
     }
 
     static synchronized Snapshot snapshot(Context context) {
-        Ledger ledger = read(context);
-        long age = ledger.eventMillis > 0 ? Math.max(0, System.currentTimeMillis() - ledger.eventMillis) : 0;
-        AlarmStateProtocol.Availability availability;
-        if (!permissionGranted(context)) availability = AlarmStateProtocol.Availability.NO_ACCESS;
-        else if (!validAdt(context)) availability = AlarmStateProtocol.Availability.SETUP;
-        else if (!connected || !reconciled) availability = AlarmStateProtocol.Availability.OFFLINE;
-        else if (storageFailed) availability = AlarmStateProtocol.Availability.NO_STATE;
-        else availability = ledger.availability(System.currentTimeMillis(), connectionHasLatest);
-        return new Snapshot(availability == AlarmStateProtocol.Availability.READY ? ledger.state : AlarmStateProtocol.State.UNKNOWN,
-            ledger.revision, age, availability, ledger.completedRequest, ledger.evidence);
+        AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
+        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP);
+        SharedPreferences stored = preferences(context);
+        AdtLiveLedger.Snapshot value = read(stored, binding).snapshot(SystemClock.elapsedRealtime(), boot(context));
+        AlarmStateProtocol.Availability failure = null;
+        if (storageFailed) failure = AlarmStateProtocol.Availability.NO_STATE;
+        else if (!binding.id.equals(stored.getString("bindingId", ""))) failure = AlarmStateProtocol.Availability.NO_STATE;
+        else {
+            String status = stored.getString("queryStatus", "UNAVAILABLE");
+            if ("LOGIN_REQUIRED".equals(status) || "VERIFY_LOGIN".equals(status)) failure = AlarmStateProtocol.Availability.NO_ACCESS;
+            else if ("AMBIGUOUS".equals(status) || "UNSUPPORTED".equals(status)) failure = AlarmStateProtocol.Availability.NO_STATE;
+            else if (!"READY".equals(status) && !"BUSY".equals(status)) failure = AlarmStateProtocol.Availability.OFFLINE;
+        }
+        return new Snapshot(value, failure);
+    }
+
+    /** Worker-only read. Concurrent requests share a read begun after their arrival where possible. */
+    static Snapshot refresh(Context context) {
+        Context app = context.getApplicationContext();
+        AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
+        if (binding == null) return snapshot(app);
+        long arrived = SystemClock.elapsedRealtime(), deadline = arrived + QUERY_MS;
+        boolean locked = false;
+        try {
+            locked = QUERY_LOCK.tryLock(QUERY_MS, TimeUnit.MILLISECONDS);
+            if (!locked) { failed(app, binding, AdtPortalClient.Status.UNAVAILABLE); return snapshot(app); }
+            synchronized (PhoneAlarmState.class) {
+                SharedPreferences stored = preferences(app);
+                if (binding.id.equals(stored.getString("bindingId", ""))
+                        && stored.getLong("lastQueryStarted", -1) >= arrived
+                        && stored.getInt("lastQueryBoot", -1) == boot(app)) return snapshot(app);
+            }
+            long started = SystemClock.elapsedRealtime();
+            int queryBoot = boot(app);
+            AdtPortalClient.Result result = queryOperation.query(app, deadline);
+            long received = SystemClock.elapsedRealtime();
+            synchronized (PhoneAlarmState.class) {
+                if (!AdtPortalSession.valid(app, binding)) return snapshot(app);
+                if (result == null || received >= deadline || received < started || queryBoot != boot(app)) {
+                    failed(app, binding, AdtPortalClient.Status.UNAVAILABLE); return snapshot(app);
+                }
+                if (result.status != AdtPortalClient.Status.READY && result.status != AdtPortalClient.Status.BUSY) {
+                    failed(app, binding, result.status); return snapshot(app);
+                }
+                AdtLiveLedger ledger = read(preferences(app), binding);
+                if (!ledger.observe(new AdtLiveLedger.Sample(result.state, result.systemId, result.partitionId,
+                        started, received, queryBoot, Boolean.TRUE.equals(result.loading)))) {
+                    failed(app, binding, AdtPortalClient.Status.UNSUPPORTED); return snapshot(app);
+                }
+                write(app, binding, ledger, result.status, started, queryBoot);
+                return snapshot(app);
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt(); failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);
+        } catch (RuntimeException error) {
+            failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);
+        } finally { if (locked) QUERY_LOCK.unlock(); }
+        return snapshot(app);
     }
 
     static synchronized boolean matches(Context context, String revision, AlarmAction action) {
         Snapshot current = snapshot(context);
-        return current.availability == AlarmStateProtocol.Availability.READY && current.revision.equals(revision)
-            && actionFor(current.state) == action;
+        return current.availability == AlarmStateProtocol.Availability.READY
+            && current.revision.equals(revision) && actionFor(current.state) == action;
     }
-
-    /** Consumes the displayed revision durably before any native scene activation. */
-    static synchronized boolean beginCommand(Context context, String revision, AlarmAction action) {
+    static boolean beginCommand(Context context, String revision, AlarmAction action) {
         return beginCommand(context, revision, action, UUID.randomUUID().toString());
     }
-
+    /** The consuming record reaches disk before the caller may click ADT's native scene widget. */
     static synchronized boolean beginCommand(Context context, String revision, AlarmAction action, String requestId) {
-        if (!AlarmStateProtocol.uuid(requestId) || !matches(context, revision, action)) return false;
-        Ledger ledger = read(context);
-        ledger.begin(System.currentTimeMillis(), requestId);
-        if (!write(context, ledger)) return false;
-        changed(context);
+        if (!matches(context, revision, action)) return false;
+        AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
+        if (binding == null) return false;
+        SharedPreferences stored = preferences(context);
+        AdtLiveLedger ledger = read(stored, binding);
+        if (!ledger.begin(revision, action, requestId, SystemClock.elapsedRealtime(), boot(context))) return false;
+        if (!write(context, binding, ledger, AdtPortalClient.Status.READY,
+                stored.getLong("lastQueryStarted", -1), stored.getInt("lastQueryBoot", -1))) return false;
+        Context app = context.getApplicationContext();
+        try { PhoneStateLink.publish(app); } catch (RuntimeException ignored) { }
+        try { scheduleResultRead(app, requestId, SystemClock.elapsedRealtime() + COMMAND_CONFIRMATION_MILLIS); }
+        catch (RuntimeException ignored) { /* A watch query will also read the result. */ }
         return true;
     }
 
-    /** Called only after an explicit, current confirmation in the private phone recovery screen. */
-    static synchronized boolean recordPhoneCheck(Activity activity, AlarmStateProtocol.State checked, String expectedRevision) {
-        if (activity == null || !AlarmStateProtocol.uuid(expectedRevision) || !RoutineAccess.visibleUnlocked(activity) || ArmExperimentService.isRunning()
-                || WidgetSetupActivity.hasListeningHost() || !connected || !reconciled
-                || !permissionGranted(activity) || !validAdt(activity) || RoutineAccess.snapshot(activity) == null) return false;
-        Ledger ledger = read(activity);
-        if (storageFailed || !expectedRevision.equals(ledger.revision)
-                || !ledger.recordPhoneCheck(checked, System.currentTimeMillis())) return false;
-        if (!write(activity, ledger)) return false;
-        // This observed status is usable only in the currently connected listener session.
-        // Reconnection still requires normal reconciliation with actual ADT notifications.
-        connectionHasLatest = connected && reconciled;
-        changed(activity);
-        return true;
+    private static void scheduleResultRead(Context app, String request, long deadline) {
+        scheduleOperation.after(() -> {
+            // These are GETs only. Never retry a scene or infer its success from dispatch.
+            AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
+            if (binding == null) return;
+            synchronized (PhoneAlarmState.class) {
+                AdtLiveLedger.Snapshot value = read(preferences(app), binding).snapshot(SystemClock.elapsedRealtime(), boot(app));
+                if (!request.equals(value.requestId)) return;
+            }
+            Snapshot value = refresh(app);
+            PhoneStateLink.publish(app);
+            if (value.pending && SystemClock.elapsedRealtime() < deadline) scheduleResultRead(app, request, deadline);
+        }, 1_000);
     }
 
-    static boolean permissionGranted(Context context) {
+    /** Notification contents never enter the ledger; a missed notification is recovered by a GET. */
+    static void hint(Context context) {
+        Context app = context.getApplicationContext();
+        if (AdtPortalSession.binding(app) == null || !HINT_QUEUED.compareAndSet(false, true)) return;
         try {
-            NotificationManager manager = context.getSystemService(NotificationManager.class);
-            return manager != null && manager.isNotificationListenerAccessGranted(new ComponentName(context, AdtStateListener.class));
-        } catch (RuntimeException ignored) { return false; }
+            scheduleOperation.after(() -> {
+                try { refresh(app); PhoneStateLink.publish(app); }
+                finally { HINT_QUEUED.set(false); }
+            }, 500);
+        } catch (RuntimeException ignored) { HINT_QUEUED.set(false); }
     }
 
     static String setupStatus(Context context) {
         Snapshot value = snapshot(context);
         switch (value.availability) {
-            case READY: return value.evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
-                ? "You checked " + stateLabel(value.state) + " on this phone. This checked status expires after 5 minutes."
-                : "ADT last reported " + stateLabel(value.state) + ". State notifications are enabled.";
-            case NO_ACCESS: return "Allow notification access to receive ADT alarm state.";
-            case SETUP: return "The supported ADT app version is required for state reports.";
-            case OFFLINE: return "Waiting for the ADT notification listener to connect.";
-            case STALE: return value.evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
-                ? "Your checked status has expired. Check ADT again or wait for a new ADT state report."
-                : "The latest ADT state report is over 24 hours old. Check ADT.";
-            case BUSY: return "Waiting for a newer ADT state report after the last request.";
-            case UNCONFIRMED: return "Result not confirmed. Check ADT before sending another request.";
-            default: return "Alarm state is unknown. A clear ADT Armed or Disarmed notification is needed.";
+            case READY: return "ADT live status: " + stateLabel(value.state) + ". Checked " + value.ageMillis / 1000 + " seconds ago.";
+            case SETUP: return "Set up ADT live status to connect to your alarm's current reported state.";
+            case NO_ACCESS: return "ADT sign-in has expired or needs verification. Open Set up ADT live status.";
+            case STALE: return "Swipe to the watch tile or refresh to query ADT again.";
+            case BUSY: return "Querying ADT for the result of the request.";
+            case OFFLINE: return "Could not read ADT. Refresh to try another status check.";
+            default: return "No verified ADT status. Open Set up ADT live status and check the selected system.";
         }
     }
-
-    static synchronized void listenerConnecting(Context context) {
-        connected = true; reconciled = false; connectionHasLatest = false;
-        changed(context);
-    }
-
-    static synchronized void reconcile(Context context, StatusBarNotification[] notifications) {
-        if (!connected) return;
-        Ledger ledger = read(context);
-        long now = System.currentTimeMillis();
-        if (notifications != null) for (StatusBarNotification notification : notifications) {
-            Event event = parse(notification, now);
-            if (event != null) ledger.accept(event);
-        }
-        connectionHasLatest = false;
-        if (notifications != null) for (StatusBarNotification notification : notifications) {
-            Event event = parse(notification, now);
-            if (event != null && ledger.isLatest(event)) connectionHasLatest = true;
-        }
-        reconciled = notifications != null;
-        write(context, ledger);
-        changed(context);
-    }
-
-    static synchronized void posted(Context context, StatusBarNotification notification) {
-        if (!connected || !reconciled) return;
-        Event event = parse(notification, System.currentTimeMillis());
-        if (event == null) return;
-        Ledger ledger = read(context);
-        boolean updated = ledger.accept(event);
-        boolean previouslyHadLatest = connectionHasLatest;
-        if (ledger.isLatest(event)) connectionHasLatest = true;
-        if (updated) write(context, ledger);
-        if (updated || previouslyHadLatest != connectionHasLatest) changed(context);
-    }
-
-    static synchronized void listenerDisconnected(Context context) {
-        connected = false; reconciled = false; connectionHasLatest = false;
-        changed(context);
-    }
-
-    private static void changed(Context context) {
-        // No notification text, account, home, panel or notification identifiers leave this class.
-        try { PhoneStateLink.publish(context.getApplicationContext()); }
-        catch (RuntimeException ignored) { /* Publication cannot undo or interrupt a durable command decision. */ }
-    }
-
-    private static boolean validAdt(Context context) {
-        try {
-            PackageInfo installed = context.getPackageManager().getPackageInfo(ADT_PACKAGE, 0);
-            return installed.getLongVersionCode() == 2307 && installed.applicationInfo != null && installed.applicationInfo.enabled;
-        } catch (Exception ignored) { return false; }
-    }
-
-    static AlarmAction actionFor(AlarmStateProtocol.State state) {
-        if (state == AlarmStateProtocol.State.DISARMED) return AlarmAction.ARM_STAY;
-        if (state == AlarmStateProtocol.State.ARMED_STAY || state == AlarmStateProtocol.State.ARMED_AWAY) return AlarmAction.DISARM;
-        return null;
-    }
-
+    static AlarmAction actionFor(AlarmStateProtocol.State state) { return AlarmStateProtocol.action(state); }
     private static String stateLabel(AlarmStateProtocol.State state) {
-        switch (state) {
-            case DISARMED: return "Disarmed";
-            case ARMED_STAY: return "Armed Stay";
-            case ARMED_AWAY: return "Armed Away";
-            default: return "unknown";
-        }
+        return state == AlarmStateProtocol.State.DISARMED ? "Disarmed"
+            : state == AlarmStateProtocol.State.ARMED_STAY ? "Armed Stay"
+            : state == AlarmStateProtocol.State.ARMED_AWAY ? "Armed Away" : "Unknown";
     }
-
-    static final class Event {
-        final AlarmStateProtocol.State state;
-        final String scope;
-        final long millis;
-        Event(AlarmStateProtocol.State state, String scope, long millis) { this.state = state; this.scope = scope; this.millis = millis; }
-    }
-
-    static Event parse(StatusBarNotification posted, long now) {
-        if (posted == null || !ADT_PACKAGE.equals(posted.getPackageName())) return null;
+    private static AdtPortalClient.Result queryPortal(Context context, long deadline) {
+        FutureTask<AdtPortalClient.Session> session = new FutureTask<>(() -> AdtPortalSession.session(context));
+        new Handler(Looper.getMainLooper()).post(session);
         try {
-            Notification notification = posted.getNotification();
-            if (notification == null || notification.extras == null || (notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return null;
-            CharSequence title = notification.extras.getCharSequence(Notification.EXTRA_TITLE);
-            CharSequence body = notification.extras.getCharSequence(Notification.EXTRA_TEXT);
-            CharSequence big = notification.extras.getCharSequence(Notification.EXTRA_BIG_TEXT);
-            // Both complete text forms must agree; do not guess from a truncated or generic notification.
-            if (big != null && body != null && !big.toString().equals(body.toString())) return null;
-            return parseText(title == null ? null : title.toString(), body != null ? body.toString() : big == null ? null : big.toString(),
-                notification.when, now, ZoneId.systemDefault());
-        } catch (RuntimeException ignored) { return null; }
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            if (remaining <= 0) return null;
+            return new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS)).query(deadline);
+        } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
+        catch (Exception error) { return null; }
+        finally { session.cancel(false); }
     }
-
-    static Event parseText(String title, String body, long when, long now, ZoneId zone) {
-        if (title == null || body == null || title.length() > 512 || body.length() > 2048 || when <= 0 || when > now + 60_000) return null;
-        Matcher heading = TITLE.matcher(title), detail = BODY.matcher(body);
-        if (!heading.matches() || !detail.matches() || !heading.group(1).equals(detail.group(2))
-                || !heading.group(2).equals(detail.group(3)) || !heading.group(3).equals(detail.group(6))) return null;
-        try {
-            LocalDateTime minute = LocalDateTime.parse(detail.group(5) + " " + detail.group(4), DATE);
-            // ADT's second-resolution event timestamp must agree with the human-readable local minute.
-            if (!LocalDateTime.ofInstant(Instant.ofEpochMilli(when), zone).withSecond(0).withNano(0).equals(minute)) return null;
-            AlarmStateProtocol.State state;
-            switch (detail.group(3)) {
-                case "Disarmed": state = AlarmStateProtocol.State.DISARMED; break;
-                case "Armed Stay": state = AlarmStateProtocol.State.ARMED_STAY; break;
-                case "Armed Away": state = AlarmStateProtocol.State.ARMED_AWAY; break;
-                default: return null;
-            }
-            String scope = digest(detail.group(1) + "\n" + detail.group(2) + "\n" + detail.group(6));
-            return new Event(state, scope, when);
-        } catch (RuntimeException ignored) { return null; }
+    private static synchronized void failed(Context context, AdtPortalSession.Binding binding, AdtPortalClient.Status status) {
+        if (!AdtPortalSession.valid(context, binding)) return;
+        SharedPreferences stored = preferences(context);
+        SharedPreferences.Editor edit = stored.edit();
+        if (!binding.id.equals(stored.getString("bindingId", ""))) edit.clear();
+        storageFailed = !edit.putString("bindingId", binding.id).putString("queryStatus", status.name()).commit();
     }
-
-    private static String digest(String input) {
-        try {
-            byte[] bytes = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
-            StringBuilder result = new StringBuilder(64);
-            for (byte value : bytes) result.append(String.format(Locale.ROOT, "%02x", value & 255));
-            return result.toString();
-        } catch (Exception failure) { throw new IllegalStateException("Scope hashing unavailable"); }
+    private static AdtLiveLedger read(SharedPreferences stored, AdtPortalSession.Binding binding) {
+        Map<String, String> values = new LinkedHashMap<>();
+        if (binding.id.equals(stored.getString("bindingId", "")))
+            for (Map.Entry<String, ?> entry : stored.getAll().entrySet())
+                if (entry.getValue() instanceof String) values.put(entry.getKey(), (String) entry.getValue());
+        return AdtLiveLedger.restore(binding.systemId, binding.partitionId, values);
     }
-
-    /** Pure ordering/pending model, also exercised with inert test events. */
-    static final class Ledger {
-        AlarmStateProtocol.State state = AlarmStateProtocol.State.UNKNOWN;
-        AlarmStateProtocol.Evidence evidence = AlarmStateProtocol.Evidence.ADT_NOTIFICATION;
-        String scope = "", revision = UUID.randomUUID().toString(), pendingRequest = "-", completedRequest = "-";
-        long eventMillis, conflictMillis, pendingAfter, completionPendingAfter;
-        boolean ambiguous;
-
-        boolean accept(Event event) {
-            if (ambiguous) return false;
-            if (scope.isEmpty()) scope = event.scope;
-            if (!scope.equals(event.scope)) { ambiguous = true; revokeCompletion(); revise(); return true; }
-            if (event.millis < eventMillis) return false;
-            if (event.millis == eventMillis) {
-                if (event.state != state && conflictMillis != eventMillis) {
-                    conflictMillis = eventMillis;
-                    revokeCompletion();
-                    revise();
-                    return true;
-                }
-                return false;
-            }
-            state = event.state; eventMillis = event.millis; conflictMillis = 0;
-            evidence = AlarmStateProtocol.Evidence.ADT_NOTIFICATION;
-            if (pendingAfter > 0 && eventMillis > pendingAfter) {
-                // A newer report confirms the outcome even when an idempotent scene leaves the state unchanged.
-                completedRequest = pendingRequest;
-                completionPendingAfter = pendingAfter;
-                pendingAfter = 0;
-                pendingRequest = "-";
-            } else completionPendingAfter = 0;
-            revise();
-            return true;
-        }
-
-        boolean isLatest(Event event) {
-            return evidence == AlarmStateProtocol.Evidence.ADT_NOTIFICATION && !ambiguous && conflictMillis == 0
-                && scope.equals(event.scope) && eventMillis == event.millis && state == event.state;
-        }
-
-        boolean recordPhoneCheck(AlarmStateProtocol.State checked, long now) {
-            if (actionFor(checked) == null || ambiguous || conflictMillis > 0 || !scope.matches("[0-9a-f]{64}")
-                    || eventMillis <= 0 || now <= eventMillis || now <= pendingAfter) return false;
-            state = checked;
-            evidence = AlarmStateProtocol.Evidence.PHONE_CHECK;
-            eventMillis = now;
-            if (pendingAfter > 0) {
-                completedRequest = pendingRequest;
-                completionPendingAfter = pendingAfter;
-                pendingAfter = 0;
-                pendingRequest = "-";
-            } else completionPendingAfter = 0;
-            revise();
-            return true;
-        }
-
-        void begin(long now) { begin(now, "-"); }
-
-        void begin(long now, String request) {
-            if (!(AlarmStateProtocol.uuid(request) || "-".equals(request))) throw new IllegalArgumentException("Invalid pending request");
-            pendingAfter = Math.max(now, eventMillis);
-            pendingRequest = request;
-            completedRequest = "-";
-            completionPendingAfter = 0;
-            revise();
-        }
-
-        private void revokeCompletion() {
-            // Two contradictory notifications can arrive separately, including across a process restart.
-            // Restore the unresolved request if the notification that completed it proves ambiguous.
-            if (completionPendingAfter == 0) return;
-            pendingAfter = completionPendingAfter;
-            pendingRequest = completedRequest;
-            completedRequest = "-";
-            completionPendingAfter = 0;
-        }
-
-        AlarmStateProtocol.Availability availability(long now, boolean hasLatest) {
-            if (ambiguous || conflictMillis > 0) return AlarmStateProtocol.Availability.NO_STATE;
-            if (pendingAfter > 0) return now < pendingAfter || now - pendingAfter >= COMMAND_CONFIRMATION_MILLIS
-                ? AlarmStateProtocol.Availability.UNCONFIRMED : AlarmStateProtocol.Availability.BUSY;
-            if (!hasLatest || eventMillis <= 0 || state == AlarmStateProtocol.State.UNKNOWN) return AlarmStateProtocol.Availability.NO_STATE;
-            long maxAge = evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
-                ? AlarmStateProtocol.PHONE_CHECK_FRESH_MS : MAX_AGE_MILLIS;
-            if (now < eventMillis || now - eventMillis > maxAge) return AlarmStateProtocol.Availability.STALE;
-            return AlarmStateProtocol.Availability.READY;
-        }
-
-        private void revise() { revision = UUID.randomUUID().toString(); }
+    private static boolean write(Context context, AdtPortalSession.Binding binding, AdtLiveLedger ledger,
+            AdtPortalClient.Status status, long started, int queryBoot) {
+        if (!AdtPortalSession.valid(context, binding)) return false;
+        SharedPreferences.Editor edit = preferences(context).edit().clear();
+        for (Map.Entry<String, String> item : ledger.save().entrySet()) edit.putString(item.getKey(), item.getValue());
+        storageFailed = !edit.putString("bindingId", binding.id).putString("queryStatus", status.name())
+            .putLong("lastQueryStarted", started).putInt("lastQueryBoot", queryBoot).commit();
+        return !storageFailed;
     }
-
-    private static Ledger read(Context context) {
-        Ledger ledger = new Ledger();
-        try {
-            SharedPreferences stored = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
-            ledger.state = AlarmStateProtocol.State.valueOf(stored.getString("state", "UNKNOWN"));
-            ledger.evidence = AlarmStateProtocol.Evidence.valueOf(stored.getString("evidence", "ADT_NOTIFICATION"));
-            ledger.scope = stored.getString("scope_hash", "");
-            ledger.revision = stored.getString("revision", ledger.revision);
-            UUID.fromString(ledger.revision);
-            ledger.eventMillis = stored.getLong("event_ms", 0);
-            ledger.conflictMillis = stored.getLong("conflict_ms", 0);
-            ledger.pendingAfter = stored.getLong("pending_after_ms", 0);
-            ledger.pendingRequest = stored.getString("pending_request", "-");
-            ledger.completedRequest = stored.getString("completed_request", "-");
-            ledger.completionPendingAfter = stored.getLong("completion_pending_after_ms", 0);
-            ledger.ambiguous = stored.getBoolean("ambiguous", false);
-            if (ledger.eventMillis < 0 || ledger.conflictMillis < 0 || ledger.pendingAfter < 0 || ledger.completionPendingAfter < 0
-                    || (!ledger.scope.isEmpty() && !ledger.scope.matches("[0-9a-f]{64}"))
-                    || !(AlarmStateProtocol.uuid(ledger.pendingRequest) || "-".equals(ledger.pendingRequest))
-                    || !(AlarmStateProtocol.uuid(ledger.completedRequest) || "-".equals(ledger.completedRequest))
-                    || ledger.pendingAfter == 0 && !"-".equals(ledger.pendingRequest)
-                    || ledger.pendingAfter > 0 && !"-".equals(ledger.completedRequest)
-                    || ledger.completionPendingAfter > 0 && (ledger.pendingAfter > 0
-                        || ledger.completionPendingAfter >= ledger.eventMillis)) throw new IllegalStateException();
-        } catch (RuntimeException failure) { storageFailed = true; return new Ledger(); }
-        return ledger;
+    static int boot(Context context) {
+        try { return Settings.Global.getInt(context.getContentResolver(), Settings.Global.BOOT_COUNT); }
+        catch (Exception error) { return -1; }
     }
-
-    private static boolean write(Context context, Ledger ledger) {
-        try {
-            boolean saved = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().clear()
-                .putString("state", ledger.state.name()).putString("evidence", ledger.evidence.name())
-                .putString("scope_hash", ledger.scope).putString("revision", ledger.revision)
-                .putLong("event_ms", ledger.eventMillis).putLong("conflict_ms", ledger.conflictMillis)
-                .putLong("pending_after_ms", ledger.pendingAfter).putString("pending_request", ledger.pendingRequest)
-                .putString("completed_request", ledger.completedRequest).putLong("completion_pending_after_ms", ledger.completionPendingAfter)
-                .putBoolean("ambiguous", ledger.ambiguous).commit();
-            storageFailed = !saved;
-            return saved;
-        } catch (RuntimeException failure) { storageFailed = true; return false; }
+    private static SharedPreferences preferences(Context context) {
+        return context.getApplicationContext().getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
     }
 }

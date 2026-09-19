@@ -1,120 +1,114 @@
 # How ADT Watch works
 
-The phone and Wear modules share the package ID `dev.personal.adtprobe` and a
-signing identity. Google Play Services carries bounded messages between them.
-ADT credentials stay in the native ADT app; the helper has no direct ADT service
-client.
+The v0.22 architecture separates status queries from alarm execution. The phone
+and Wear modules share application ID `dev.personal.adtprobe` and a signing
+identity. Google Play Services carries bounded, source-matched messages between
+them. Live-query integration is undergoing validation.
 
 | Part | Responsibility |
 | --- | --- |
-| `phone-probe` | Native widget setup, explicit companion/routine approval, brief request service and ADT notification parsing |
-| `wear` | One alarm button, Tile, local state cache and user-initiated request flow |
-| `shared` | Action enum, strict message formats and request/state validation |
+| `phone-probe` | Separate website sign-in and live status client, native scene widgets, companion/routine approval and brief request service |
+| `wear` | One alarm button, Tile, expiring state cache and user-initiated request flow |
+| `shared` | Fixed action enum, strict message formats and request/state validation |
+
+## Authentication and status authority
+
+The owner signs into the official ADT/Alarm.com page in an embedded WebView.
+This is a separate session from the native ADT app. The helper does not read that
+app's private session or extract passwords or verification codes. WebView keeps
+session cookies in app-private storage; the status client uses those cookies
+for authenticated queries. No JavaScript bridge is installed. Session expiry or
+additional verification requires the owner to return to the sign-in page.
+
+The client permits only fixed HTTPS GET routes on Alarm.com's website API. It
+validates the returned system and partition relationships, state fields, content
+type and response bounds. It currently accepts exactly one system and one
+partition. The owner explicitly selects them and checks that they match the
+home controlled by the scene widgets. Unsupported or ambiguous responses do
+not provide actionable state. This is an unofficial website integration; it is
+not a public ADT API contract or a forced poll of the physical alarm panel.
+
+The backend's actual state is authoritative. Desired state or an outstanding
+request does not prove completion. ADT notifications can prompt a query, but
+their text and any manually entered state do not supply control authority.
+
+`AdtLiveLedger` accepts source-bound observations from queries lasting at most
+10 seconds. It rejects expired, out-of-order and mismatched responses. Every
+accepted query gets a new observation identity; unchanged actual state keeps
+the same state revision. Freshness is conservatively measured from query start,
+independently of how long the alarm has remained in that state. A usable cache
+lasts less than 60 seconds and is invalidated by reboot or clock rollback.
+Query failures also gate availability rather than presenting cached success as
+the result of a failed refresh.
 
 ## Setup and execution
 
 The owner configures separate ADT widgets for `WATCH ARM STAY` and `WATCH DISARM`
-through Android's widget consent and ADT's scene picker. Preview interaction is
-blocked by default. Routine enablement records the reviewed widget revisions,
-one native companion association and one explicitly identified connected Wear
-node. The scene name does not prove its contents; the owner reviews those in ADT.
+through Android's native widget consent and ADT's scene picker. Preview input
+is blocked by default. The helper checks the scene label; the owner must review
+the actual scene contents and options. Routine approval binds the reviewed
+widget revisions to one native companion association and one explicitly chosen
+connected Wear node. Widget reconfiguration requires another review and approval.
 
-A positive watch tap selects the action associated with the exact displayed
-state revision. A Tile supplies a short-lived, one-use launch token for that same
-action; rendering, plain launches and restored launch history do not authorize
-commands. The phone validates routine access, source, action, reported state and
-lock state before a readiness request can start its bounded 30-second service.
+A positive watch tap selects one fixed action associated with the displayed
+state revision. A Tile supplies a short-lived, one-use launch token for that
+action. Rendering, ordinary launches and restored launch history do not authorize
+commands. Both devices check the source, action, identity and deadline; watch
+focus loss, pause or lock cancels an uncommitted attempt. A matching commit
+cannot cold-start the phone service, and process death never resumes a command.
 
-The phone prepares the matching widget and returns a challenge. The watch's
-still-valid tap authorizes one matching commit automatically. This protocol
-exchange is not a second user confirmation. Both sides reject mismatched,
-expired or replayed messages. Loss of watch focus, pause or lock cancels an
-uncommitted attempt. A commit cannot cold-start the phone service, and process
-death does not resume a command. No automatic alarm retry is implemented.
+Before native execution, the phone makes a fresh read-only query. If ADT already
+reports the selected action's target state, no widget click is needed. The
+request is never reinterpreted as the opposite action. Otherwise the phone
+prepares the selected widget and uses the matched challenge/commit exchange to
+attempt it once. This exchange requires no second user confirmation.
 
-The service invokes the native widget's reviewed view listener at most once.
-That means a request was handed to ADT, not that the panel changed state. ADT
-performs its own authenticated work and may queue it. Its app battery setting
-must allow background execution. The helper cannot recall a request handed off
-to ADT.
+After final widget validation and immediately before its listener is invoked,
+the phone durably records the request as pending. A listener returning false or
+throwing may still have attempted a handoff, so that remains uncertain. Only a
+definitely unattempted command is rejected. ADT executes its own authenticated
+work and may queue it; its battery setting must permit background execution.
+The helper cannot recall work handed to ADT and never retries an alarm command.
 
-## State and colour
+## Observation and request outcomes
 
-User-enabled Android notification access feeds `PhoneAlarmState`. The parser
-accepts exact, internally consistent English alarm reports from the supported
-UK ADT package/version. It retains normalized state, event timing, a hashed
-alarm scope, revisions and pending bookkeeping. Raw notification bodies and
-account/home labels are not stored or sent to the watch.
+The ledger stores actual state separately from command outcome. A steady target
+state from a query started after dispatch can confirm the pending request.
+Provider busy responses remain transient. Request progress ends after 30
+seconds; missing confirmation becomes `UNCONFIRMED`, not an indefinite wait for
+a notification. Fresh steady ADT state remains authoritative and can restore
+controls even when the earlier request's outcome is unconfirmed.
 
-The watch queries for a source-matched phone report and shows its age. Red is
-reported Armed Stay/Away; green is reported Disarmed. Unknown, conflicting,
-unsupported, disconnected, stale or pending state becomes grey. Reports older
-than 24 hours and watch caches without recent phone contact cannot authorize a
+State reports carry both state revision and observation identity so a new query
+of an unchanged state is distinguishable from an old cache. A completed-request
+identity is attached only to a qualifying observation. Message delivery alone,
+an unsolicited hint or a native widget invocation cannot manufacture state.
+
+App/Tile loading, Refresh, update hints and completed attempts start bounded
+read-only status checks. Status retries contain no alarm command. The Tile
+waits for the phone within its original request, up to eight seconds, rather
+than relying on Wear OS to promptly replace an intermediate loading frame.
+Recovery windows, one-query-at-a-time coalescing and passive cooldowns bound
+background work. Wear OS may delay Tile entry events and visual updates.
+
+Tiles include an expiring current entry and a grey Refresh fallback. Even if a
+renderer keeps an old coloured entry visible, the app validates the token and
+state before beginning a request, and the phone performs its own live preflight.
+Red offers Disarm for reported Armed Stay/Away; green offers Arm Stay for
+reported Disarmed. Stale, unknown, unavailable or busy state cannot offer a
 coloured control.
-
-App/Tile entry, an explicit refresh, an incoming update or a completed request
-starts a bounded 30-second status recovery period. Failed queries and transient
-phone reports can retry after two seconds, with one query at a time. Starting
-an alarm action cancels status recovery so a retry cannot interfere with the
-action handshake. Finishing that attempt resumes status checks, including when
-the command outcome is uncertain. No retry carries an alarm command.
-
-The Tile also starts a status check when Wear OS requests stale content, since
-modern entry events may be delayed. Its original response awaits status for at
-most eight seconds and returns the useful result directly. v0.19's separate
-immediate checking frame was removed: physical traces showed a prompt READY
-reply followed by a substantially delayed second renderer request. Progress
-redraws are suppressed during recovery. Each waiter belongs to its initial
-recovery and cannot be extended by a replacement refresh. Failed passive recovery has a persisted
-60-second cooldown to prevent redraw loops. Visible app status refreshes near
-45 seconds, before its 60-second link freshness expires. Trusted update hints
-can advance a queued status query, rate-limited to one query per 250ms, while
-ordinary failures keep the two-second retry interval and 30-second deadline.
-
-A correlated response records phone contact separately from actionable state
-freshness. A reachable phone with a disconnected notification listener is
-therefore distinguishable from a phone that did not answer. Neither contact
-alone nor an unsolicited update clears a pending alarm action.
-
-Immediately before native execution, after final widget validation, the phone
-consumes the displayed state revision and durably records a pending request id.
-A newer ADT state report is required to clear it, including a same-state report.
-The correlated completion id lets the watch distinguish that result from an
-unchanged cache. A native listener returning false or throwing still counts as
-an attempted handoff; only a definitely unattempted command is rejected. Early
-state-bound refusals are source/request/action matched and cannot authorize a
-commit. The watch durably marks a possible COMMIT before sending it, so a crash
-before that point does not invent a pending alarm command.
-Neither a successful message send nor a widget invocation invents the opposite
-alarm state. Refresh asks for the phone's accepted report without an alarm action.
-
-After 30 seconds without confirmation, pending state becomes UNCONFIRMED rather
-than displaying indefinite progress. The pending latch remains durable. Explicit
-phone-only recovery can instead record the owner's checked state, with separate
-PHONE_CHECK evidence and a five-minute lifetime. It requires an unlocked visible
-phone and explicit confirmation, never sends an alarm command, and does not
-cancel ADT's queued work. Later real ADT notifications replace that observation.
-Report format v2 carries completion identity and evidence; v1 remains readable
-by the new watch. Update the watch before the phone.
-
-Tiles contain a finite current entry plus a timeless grey Refresh fallback.
-Coloured validity is bounded by the remaining report, phone-contact and token
-lifetimes; transient progress gets at most 30 seconds. The renderer may delay
-switching entries, so command admission continues to use monotonic time and boot
-identity. Refreshing still cannot detect a physical change whose ADT notification
-never arrives; timestamps describe the last observation, not a live panel query.
 
 ## Verification boundaries
 
-Pure and Robolectric tests cover protocols, inert widgets, lifecycle handling,
-setup revocation, actual native view input and round-screen layout. They never
-contact ADT or a physical device. One personal locked-phone Tile cycle has been
-verified for both actions with ADT battery usage Unrestricted. Wider
-compatibility and reliable overnight operation are not established. v0.17
-overnight use exposed missed confirmation recovery; v0.18 addresses the
-one-shot status-query failure path but still requires physical validation.
-Automatic swipe refresh in v0.19 was observed on the personal watch; prolonged
-idle and repeated real alarm cycles still need normal-use verification.
-In the v0.20 status-only check, the original renderer request produced usable
-state in about one second, and the user confirmed that the colour appeared
-quickly. No alarm command was sent during that check.
+Pure and Robolectric tests use invented HTTP responses, inert widgets and
+simulated lifecycle events. They do not contact ADT or operate an alarm.
+Earlier personal-device checks verified the native widget route with a locked
+phone and ADT battery usage Unrestricted. They do not establish v0.22 live-query
+compatibility, session longevity or reliable overnight operation. Those require
+separate physical verification.
+
+For an uncertain or legacy possible-send record, the watch makes one final
+read-only query at the 30-second boundary. That final attempt has a 10-second
+deadline; it does not retry itself or send an alarm command. Status freshness
+includes the matched query round trip conservatively, so transit time cannot
+extend the displayed observation beyond its lifetime.

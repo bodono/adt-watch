@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.Consumer;
 import org.junit.After;
 import org.junit.Before;
@@ -128,7 +129,7 @@ public final class AlarmTileServiceTest {
         ListenableFuture<TileBuilders.Tile> result = request(); idle();
         assertFalse(result.isDone());
         assertEquals(2, transport.nonces.size());
-        reply(1, 61_100); advance(100);
+        reply(1, 0); advance(100);
         assertTrue(tileText(result.get()).contains("Arm Stay"));
         assertEquals(60_000, result.get().getFreshnessIntervalMillis());
     }
@@ -248,7 +249,7 @@ public final class AlarmTileServiceTest {
 
     @Test public void timelineUsesEarlierTokenOrPhoneContactExpiry() throws Exception {
         request(); idle(); reply(0, 0); advance(30_000);
-        WatchAlarmStore.refresh(service); idle(); reply(1, 30_000);
+        WatchAlarmStore.refresh(service); idle(); reply(1, 0);
         TileBuilders.Tile renewedContact = request().get();
         TimelineBuilders.TimeInterval first = renewedContact.getTileTimeline().getTimelineEntries().get(0).getValidity();
         assertEquals("A fresh phone reply must not extend the old tile action token", 30_000,
@@ -263,7 +264,7 @@ public final class AlarmTileServiceTest {
 
     @Test public void almostExpiredAdtReportShortensTheColouredTimeline() throws Exception {
         ListenableFuture<TileBuilders.Tile> result = request(); idle();
-        reply(0, AlarmStateProtocol.MAX_STATE_AGE_MS - 5_000); advance(100);
+        reply(0, AlarmStateProtocol.LINK_FRESH_MS - 5_000); advance(100);
         TimelineBuilders.TimeInterval validity = result.get().getTileTimeline().getTimelineEntries().get(0).getValidity();
         assertEquals(4_900, validity.getEndMillis() - validity.getStartMillis());
         assertRefreshFallback(result.get().getTileTimeline().getTimelineEntries().get(1));
@@ -342,7 +343,8 @@ public final class AlarmTileServiceTest {
     private void reply(int index, long age) {
         assertTrue(WatchAlarmStore.accept(service, PHONE, new AlarmStateProtocol.Report(
                 transport.nonces.get(index), AlarmStateProtocol.State.DISARMED,
-                AlarmStateProtocol.Availability.READY, REVISION, age), SystemClock.elapsedRealtime(), BOOT));
+                AlarmStateProtocol.Availability.READY, REVISION, age, "-", AlarmStateProtocol.Evidence.ADT_QUERY,
+                UUID.randomUUID().toString()), SystemClock.elapsedRealtime(), BOOT));
     }
     private void idle() { Shadows.shadowOf(Looper.getMainLooper()).idle(); }
     private void advance(long millis) { Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis)); }

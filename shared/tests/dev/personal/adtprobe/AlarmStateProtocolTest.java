@@ -8,6 +8,42 @@ public final class AlarmStateProtocolTest {
     private static final String REQUEST = "00000000-0000-0000-0000-000000000001";
     private static final String REVISION = "00000000-0000-0000-0000-000000000002";
     private static final String COMPLETED = "abcdef12-1234-4234-8234-123456789abc";
+    private static final String OBSERVATION = "abcdef12-1234-4234-8234-123456789def";
+
+    @Test public void v3SeparatesFreshObservationFromStableStateAndCommandIdentities() {
+        for (long age : new long[] {0, 59_999, 60_000}) {
+            AlarmStateProtocol.Report original = new AlarmStateProtocol.Report(REQUEST, AlarmStateProtocol.State.DISARMED,
+                AlarmStateProtocol.Availability.READY, REVISION, age, COMPLETED, AlarmStateProtocol.Evidence.ADT_QUERY, OBSERVATION);
+            byte[] bytes = original.encode();
+            assertTrue(new String(bytes, StandardCharsets.US_ASCII).startsWith("ADT-STATE/3\n"));
+            assertEquals(10, new String(bytes, StandardCharsets.US_ASCII).split("\n", -1).length);
+            AlarmStateProtocol.Report parsed = AlarmStateProtocol.parseReport(bytes);
+            assertNotNull(parsed); assertEquals(OBSERVATION, parsed.observationId);
+            assertEquals(REVISION, parsed.revision); assertEquals(COMPLETED, parsed.completedRequest);
+            assertEquals(REQUEST, parsed.request); assertEquals(age, parsed.ageMillis);
+            assertEquals(AlarmStateProtocol.Evidence.ADT_QUERY, parsed.evidence);
+            assertArrayEquals(bytes, parsed.encode());
+            assertNull(AlarmStateProtocol.parseTap(bytes));
+        }
+    }
+
+    @Test public void queryAuthorityRequiresANewSchemaValidObservationAndShortFreshness() {
+        String base = "ADT-STATE/3\nSTATE\n" + REQUEST + "\nDISARMED\nREADY\n" + REVISION + "\n0\n-\nADT_QUERY\n";
+        for (String bad : new String[] {"-", "", OBSERVATION.toUpperCase(), "not-an-observation", OBSERVATION + "\n"})
+            assertNull(AlarmStateProtocol.parseReport(ascii(base + bad)));
+        assertNull(AlarmStateProtocol.parseReport(ascii((base + OBSERVATION).replace("\n0\n-", "\n60001\n-"))));
+        assertNull(AlarmStateProtocol.parseReport(ascii(base.replace("ADT-STATE/3", "ADT-STATE/2") + OBSERVATION)));
+        assertNull(AlarmStateProtocol.parseReport(ascii(base.substring(0, base.length() - 1).replace("ADT-STATE/3", "ADT-STATE/2"))));
+        assertNull(AlarmStateProtocol.parseReport(ascii((base + OBSERVATION).replace("ADT_QUERY", "PHONE_CHECK"))));
+        try {
+            new AlarmStateProtocol.Report(REQUEST, AlarmStateProtocol.State.DISARMED, AlarmStateProtocol.Availability.READY,
+                REVISION, 0, "-", AlarmStateProtocol.Evidence.ADT_QUERY);
+            fail("Query authority requires a separate observation identity");
+        } catch (IllegalArgumentException expected) { }
+        AlarmStateProtocol.Report unavailable = new AlarmStateProtocol.Report(REQUEST, AlarmStateProtocol.State.UNKNOWN,
+            AlarmStateProtocol.Availability.OFFLINE, "-", 0, "-", AlarmStateProtocol.Evidence.ADT_QUERY, "-");
+        assertNotNull(AlarmStateProtocol.parseReport(unavailable.encode()));
+    }
     @Test public void queryAndTapKeepTheirIndependentIdentities() {
         assertEquals(REQUEST, AlarmStateProtocol.parseQuery(AlarmStateProtocol.query(REQUEST)));
         AlarmStateProtocol.Tap tap = AlarmStateProtocol.parseTap(

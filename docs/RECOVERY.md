@@ -1,9 +1,9 @@
 # Install and recover ADT Watch
 
-This guide covers v0.21. It distinguishes rebuilding the apps from recreating
-their private setup on a phone and watch. The repository provides source;
-Android widget consent, watch association, ADT sign-in and notification access
-are completed by the owner on their devices.
+This guide describes v0.22, whose live-query integration is undergoing
+validation. Rebuilding the apps does not recreate their private device setup.
+The owner completes native widget consent, watch association, routine approval
+and both ADT sign-ins on their devices.
 
 ## Preserve the signing key
 
@@ -83,17 +83,18 @@ adb -d install -r build/phone-probe.apk
 `-r` updates an existing matching-signature installation while retaining its
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
-builds at the same version and signature. Update the watch first, then the phone:
-v0.21 adds result-completion and evidence fields to phone reports. Its watch can
-read older phone reports, but both apps need the update for the new recovery.
+builds at the same version and signature. Update the watch first, then the phone.
+Both apps need v0.22 for live-query observation identity and freshness handling.
+After updating an earlier installation, complete the new website sign-in and
+explicit system selection below; existing native ADT sign-in is not enough.
 
 ## Fresh phone setup
 
 Routine watch control requires Android 15 or later and a secure phone screen
 lock. Install and sign into UK **ADT Smart Services** in the same Android user
-profile as the helper. v0.20 accepts package `com.adtuk.adtukalarm` with
-**versionCode 2307** only. Its widget and English notification formats are
-version-specific; an unsupported version needs a code/compatibility review.
+profile as the helper. The native widget contract accepts package
+`com.adtuk.adtukalarm` with **versionCode 2307** only. Other versions require a
+compatibility review.
 
 1. **Review two complete scenes in ADT.** Create or review `WATCH ARM STAY`
    containing only `SYSTEM / ARM STAY`, and `WATCH DISARM` containing only
@@ -123,7 +124,18 @@ version-specific; an unsupported version needs a code/compatibility review.
    instead…** is available if needed. Check the association status before
    leaving this screen.
 
-5. **Enable routine controls once.** With exactly one watch connected, open
+5. **Sign in for live status and choose the same home.** Open **Set up ADT live
+   status…** on the helper's main screen. Sign into the official ADT/Alarm.com
+   page shown there and complete any verification in that page. This is a
+   separate session from the native ADT app. The helper does not extract or
+   store your password or verification code; WebView retains session cookies
+   in app-private browser storage. Tap **Check live status**. Review the returned
+   system, partition and actual state, then tap **Use this ADT system** only if
+   it is the same home as both scene widgets. No system is selected automatically.
+   Only one system with one partition is currently supported. The status check
+   and selection send no alarm command and do not enable watch control.
+
+6. **Enable routine controls once.** With exactly one watch connected, open
    **Watch control access… → Enable watch controls once…**. Choose the associated
    watch. Read **Enable these watch controls?**, check that the associated device
    and connected watch both refer to your watch, then select **I reviewed them —
@@ -131,93 +143,94 @@ version-specific; an unsupported version needs a code/compatibility review.
    future one-tap requests while the phone is locked. Enabling it sends no alarm
    request.
 
-6. **Allow ADT state reports.** From the main screen, tap **Allow ADT alarm
-   status…** and enable **ADT Watch alarm status** in Android's native
-   notification-access settings. Ensure ADT's own alarm-state notifications are
-   enabled. The helper reads matching ADT reports and stores normalized state,
-   timing, a hashed alarm scope and request/state bookkeeping; it does not
-   store notification bodies.
-
 7. **Allow ADT background work.** In the phone's native app settings, set the
    **ADT app's battery usage to Unrestricted**. This is ADT's setting, rather
-   than just the helper's. In the verified setup, adaptive battery restrictions
-   delayed native ADT jobs even with normal Battery Saver off. Changing ADT to
-   Unrestricted released the queued work without changing global power settings.
+   than just the helper's. Native ADT jobs were delayed by adaptive battery
+   restrictions in the personal setup even with normal Battery Saver off.
 
-The setup starts with unknown state unless a usable ADT report is available.
-Wait for a real Armed Stay, Armed Away or Disarmed notification from normal ADT
-use. If you choose to perform an action in the ADT phone app to establish a
-fresh report, do so only when you intend that alarm change and verify the result
-there. **Refresh** cannot manufacture a report or infer the state from a scene
-name. Conflicting or unrecognized reports leave the control grey.
+8. **Optionally allow notification refresh hints.** From the helper's main
+   screen, tap **Allow ADT refresh hints…** and enable **ADT Watch alarm status**
+   in Android's native notification-access settings. These notifications only
+   prompt a read-only ADT query. They do not determine the displayed state or
+   confirm an alarm request, and notification access is not required for live
+   status queries.
+
+A successful live query establishes status without changing the alarm or
+waiting for a new notification. The read-only client uses a fixed part of
+Alarm.com's website API, an unofficial integration that may change. It returns
+ADT's backend-reported actual state; it does not force the physical panel to
+poll. An unsupported, ambiguous or failed response leaves controls unavailable.
 
 ## Use the watch
 
 Open **ADT Watch** on the watch. A watch PIN or pattern is optional; unlock an
-existing watch lock normally. Keep the paired phone powered, **locked** and
-connected, with ADT signed in and able to reach its service.
+existing watch lock normally. Keep the phone powered, **locked** and connected,
+with the native ADT app and the helper's separate website session signed in.
 
 The single button is red for ADT-reported Armed Stay/Away and requests **Disarm**;
-it is green for reported Disarmed and requests **Arm Stay**. Tap once. There is
-no second confirmation or automatic retry. Keep the watch app visible while it
-sends. Grey means no action is available or a request is awaiting a newer ADT
-report. Reports over 24 hours old are not offered as coloured controls.
+it is green for reported Disarmed and requests **Arm Stay**. Tap once and keep
+the app visible while it sends. There is no second confirmation or automatic
+alarm retry. The selected action remains fixed. A fresh phone query checks the
+actual state before native execution; if the target is already satisfied, no
+widget click is made. Otherwise the selected scene is attempted once.
 
 For swipe access, add **ADT Watch** using the watch's tile picker. A coloured
 Tile tap opens the app and continues the same action without a second tap.
-Loading a stale Tile automatically fetches status; normally you do not need to
-press Refresh first. Wear OS controls refresh scheduling, so every swipe cannot
-be guaranteed an immediate update. The Tile can briefly load while the phone
-answers; it then shows the result directly. **Refresh** remains available if
-usable status cannot be obtained.
+App/Tile loading and **Refresh** ask the phone to query ADT, without operating
+the alarm. Wear OS controls scheduling, so every swipe cannot be guaranteed a
+new query. The Tile may briefly load while the phone answers. Status is usable
+for less than 60 seconds; the displayed observation age measures time since
+its query, even when the alarm has remained unchanged for hours.
 See [Google's tile instructions](https://support.google.com/googlepixelwatch/answer/12662644?hl=en-GB).
 The computer and USB cable are not required for daily use.
 
-Both directions of this Tile flow have worked with the phone locked and ADT
-set to Unrestricted, taking a few seconds. v0.17 overnight use exposed missed
-confirmation recovery. v0.20 retries status checks for up to 30 seconds, but
-reliable overnight operation and broader compatibility remain unverified.
+A widget click or a successful message send does not prove a state change.
+The helper checks ADT afterward. After 30 seconds, an unresolved request becomes
+**Result unconfirmed** and progress stops. A fresh steady ADT state can restore
+controls without waiting for a notification; the earlier uncertain request is
+not automatically repeated. Native ADT work already queued can execute later.
+
+Earlier native-widget cycles worked with the phone locked and ADT set to
+Unrestricted. v0.22 live queries, session longevity and reliable overnight use
+still require physical verification.
 
 ## Changes and troubleshooting
 
-- **Grey or uncertain after a tap:** do not repeat it. Check the actual alarm
-  state in ADT. Work already queued inside ADT can execute when background
-  restrictions lift or ADT opens; the helper cannot recall it. A new ADT state
-  report is normally needed before offering another coloured action. After 30
-  seconds v0.21 says **Result unconfirmed**, without assuming success or failure.
-- **Grey before any request:** check the phone connection, notification access,
-  supported ADT version and availability of a recent, recognized ADT report.
-  Refresh only reads status. Reopening ADT Watch alone does not send an alarm
-  command; opening native ADT may let previously queued work run.
-- **Disarm worked but Arm Stay remains grey:** the helper still needs an accepted
-  Disarmed report. v0.20 retries read-only status checks briefly and distinguishes
-  no phone reply from missing ADT status. Refresh starts another bounded status
-  check; it never resends Disarm or automatically arms the system.
-- **Missing notification or stale state after refreshing:** check ADT's Home and
-  Activity screens and allow any previous request to settle. In **ADT Watch
-  Setup → Recover missing status…**, choose the state you have just verified
-  and confirm it. This records your observation without sending an alarm command
-  or cancelling anything queued in ADT. The watch labels it **Checked** and
-  permits it for five minutes; a newer ADT notification replaces it. Check ADT's
-  arm/disarm notification rule covers all users and push notifications are on.
-- **An old coloured Tile is still visible:** v0.21 supplies a finite Tile entry
-  with a grey Refresh fallback. Wear OS schedules the visual switch; tapping an
-  expired entry still cannot bypass the app's independent expiry checks. The
-  displayed date/time is the observation time, not the time of the last refresh.
+- **Grey or uncertain after a tap:** do not repeat the tap immediately. Check
+  the actual state in ADT and let queued work settle. After 30 seconds, progress
+  ends with an unconfirmed outcome; Refresh makes a new read-only status query.
+  The helper cannot recall native ADT work already handed off.
+- **Sign-in or verification required:** unlock the phone and return to **Set up
+  ADT live status…**. Finish the official page's sign-in or verification, then
+  **Check live status** and review the same system again. The native ADT app's
+  existing login does not refresh this separate website session.
+- **Grey before any request or Refresh fails:** check the phone connection,
+  both sign-ins, selected system and supported ADT version. Website/network
+  errors cannot provide a fresh observation. Notification access alone cannot
+  repair a failed live query. Use ADT normally while status is unavailable.
+- **More than one system/partition or an unsupported response:** this version
+  cannot select an arbitrary member of a multi-system account or guess an
+  unfamiliar state. A compatibility change is needed; keep using ADT directly.
+- **An old coloured Tile remains visible:** Wear OS may delay the grey fallback.
+  An expired tap still cannot bypass token checks or the phone's live preflight.
+  A selected Disarm request is never silently turned into Arm Stay.
 - **Changing either scene or widget:** first use **Watch control access… →
-  Disable watch controls**. Review the complete scenes again, reconfigure the
-  affected widget and repeat **Enable watch controls once…**. Widget setup
-  changes invalidate the saved review, including replacing a widget with a
-  similarly named one.
+  Disable watch controls**. Review the complete scenes, reconfigure the affected
+  widget and repeat **Enable watch controls once…**. Widget changes invalidate
+  the saved review, including replacing a widget with a similarly named one.
+- **Changing the website system:** disable watch controls first. Check that both
+  native scenes address the intended home, select its live-status system and
+  repeat the scene review and routine approval. The system choice does not
+  inspect or rewrite the native scene contents.
 - **New phone, watch, cleared app data or lost association:** repeat the relevant
-  native setup and explicit watch review. Do not copy widget IDs or access
-  records between devices. ADT sign-in, ADT scenes and the signing key are
-  separate recovery items.
-- **ADT update stops compatibility:** v0.20 deliberately rejects other version
-  codes. Keep normal alarm operation available through ADT while the new widget
-  and notification contract is reviewed; do not bypass the check as a recovery
-  shortcut.
+  native setup, website sign-in, system choice and watch review. Do not copy
+  widget IDs, session cookies or access records between devices. ADT scenes,
+  private signing keys and the two sign-ins are separate recovery items.
+- **ADT or its website changes:** keep normal alarm operation available through
+  ADT while compatibility is reviewed. Do not bypass native version or response
+  validation to make an unsupported integration appear ready.
 
-Keep account details, device selectors, pairing codes, private keys, personal
-logs and ADT screenshots out of public issues and commits. The public project
-contains helper source and inert fixtures, not an ADT APK or decompiled ADT code.
+Keep account details, session cookies, device selectors, pairing codes, private
+keys, personal logs and ADT screenshots out of public issues and commits. The
+public project contains helper source and inert fixtures, not an ADT APK or
+decompiled ADT code.

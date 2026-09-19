@@ -1,37 +1,39 @@
 # ADT Watch Setup — phone module
 
-The v0.21 Android companion hosts two user-configured native UK ADT scene widgets
-and handles requests from one explicitly approved watch. It uses the installed
-ADT app for alarm execution; it does not contain ADT credentials or a direct
-ADT service client.
+The v0.22 companion queries ADT status through a separate authenticated website
+session and executes requests through two user-configured native ADT widgets.
+The live-query integration is undergoing validation.
 
-Fresh setup configures both `WATCH ARM STAY` and `WATCH DISARM` widgets, creates a
-native companion association, then enables routine controls after an explicit
-review. The owner must review every scene action and option in ADT. Widget
-previews are blocked by default, and setup itself sends no alarm request.
+Use **Set up ADT live status…** to sign into the official ADT/Alarm.com page,
+complete any verification there, then **Check live status** and **Use this ADT
+system**. Select the same home as both scene widgets. Only one system with one
+partition is supported. The helper does not extract passwords or verification
+codes; WebView retains session cookies. Sign in again when that session expires.
+The fixed GET status routes are an unofficial website API integration.
 
-Routine use requires Android 15+, a secure and locked phone, the approved watch,
-and UK ADT package `com.adtuk.adtukalarm` versionCode 2307. Set **ADT's app battery
-usage to Unrestricted**. Reconfiguring either widget invalidates the prior review;
-enable controls again after reviewing the change.
+Configure and review `WATCH ARM STAY` and `WATCH DISARM`, create a native
+companion association and explicitly enable routine controls for the selected
+watch. Preview input is blocked by default. Review every scene action and option
+in ADT; the name alone cannot prove a scene's contents. Reconfiguring either
+widget requires a new review and approval.
 
-Notification access supplies the latest accepted ADT alarm-state report. The
-helper records normalized state and timing, a hashed scope and request/state
-bookkeeping; it does not store notification bodies. A widget invocation means
-only that the native widget listener was invoked. New state is shown after ADT
-reports it.
+Routine control requires Android 15+, a secure locked phone, the approved watch
+and UK ADT `com.adtuk.adtukalarm` versionCode 2307. Keep the native ADT app signed
+in and set **its battery usage to Unrestricted**. The helper's website sign-in
+does not replace the native app's sign-in.
 
-v0.21 ties pending requests to completion reports, including same-state
-notifications. An unconfirmed result is shown after 30 seconds without clearing
-the pending request. **Recover missing status…** records an explicitly checked
-state on an unlocked phone, with separate provenance and a five-minute lifetime;
-it neither operates the alarm nor cancels anything queued in ADT.
+Refresh reads ADT's reported actual state. Notification access is optional and
+supplies refresh hints only. A fresh query also precedes an alarm action; if its
+target is already satisfied, the service skips the widget click. Otherwise it
+invokes the selected listener at most once. It never automatically retries or
+resumes a command after process death. Queued native ADT work can run later.
 
-The short service validates a fresh state-bound request and matching commit,
-invokes one widget listener at most once, and does not automatically retry or
-resume a command after process death. Previously queued ADT work can run later.
+The live ledger separates fresh observations from request outcomes. A cache
+lasts less than 60 seconds; unchanged state can have a fresh observation.
+Pending progress ends after 30 seconds. An unconfirmed request does not hide a
+subsequent fresh steady ADT state or wait indefinitely for a notification.
 
 Build both modules from the repository root with
-`./phone-probe/build.sh --check`. Tests use inert fixtures, with no device or ADT
+`./phone-probe/build.sh --check`. Tests use inert fixtures with no device or ADT
 access. See [BUILDING.md](../BUILDING.md), [recovery and setup](../docs/RECOVERY.md)
 and [architecture](../docs/ARCHITECTURE.md).

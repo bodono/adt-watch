@@ -11,10 +11,11 @@ public final class AlarmStateProtocol {
     public static final long MAX_STATE_AGE_MS = 24 * 60 * 60 * 1000L;
     public static final long LINK_FRESH_MS = 60_000;
     public static final long PHONE_CHECK_FRESH_MS = 5 * 60_000;
+    public static final long QUERY_FRESH_MS = 60_000;
     public enum State { UNKNOWN, DISARMED, ARMED_STAY, ARMED_AWAY }
     public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, UNCONFIRMED, SETUP, OFFLINE }
-    public enum DeclineReason { STATE_CHANGED, UNAVAILABLE }
-    public enum Evidence { ADT_NOTIFICATION, PHONE_CHECK }
+    public enum DeclineReason { STATE_CHANGED, UNAVAILABLE, ALREADY_SATISFIED }
+    public enum Evidence { ADT_NOTIFICATION, PHONE_CHECK, ADT_QUERY }
     private AlarmStateProtocol() { }
     public static AlarmAction action(State state) {
         if (state == State.DISARMED) return AlarmAction.ARM_STAY;
@@ -39,7 +40,7 @@ public final class AlarmStateProtocol {
         return f != null && f.length == 3 && "ADT-STATE/1".equals(f[0]) && "QUERY".equals(f[1]) && uuid(f[2]) ? f[2] : null;
     }
     public static final class Report {
-        public final String request, revision, completedRequest;
+        public final String request, revision, completedRequest, observationId;
         public final State state;
         public final Availability availability;
         public final long ageMillis;
@@ -53,29 +54,43 @@ public final class AlarmStateProtocol {
         }
         public Report(String request, State state, Availability availability, String revision, long ageMillis,
                 String completedRequest, Evidence evidence) {
+            this(request, state, availability, revision, ageMillis, completedRequest, evidence, "-");
+        }
+        public Report(String request, State state, Availability availability, String revision, long ageMillis,
+                String completedRequest, Evidence evidence, String observationId) {
             if (!(uuid(request) || "-".equals(request)) || state == null || availability == null
                     || !(uuid(revision) || "-".equals(revision)) || ageMillis < 0
                     || !(uuid(completedRequest) || "-".equals(completedRequest)) || evidence == null
+                    || !(uuid(observationId) || "-".equals(observationId))
+                    || evidence != Evidence.ADT_QUERY && !"-".equals(observationId)
                     || availability == Availability.READY && (action(state) == null || !uuid(revision)
-                        || ageMillis > (evidence == Evidence.PHONE_CHECK ? PHONE_CHECK_FRESH_MS : MAX_STATE_AGE_MS)))
+                        || evidence == Evidence.ADT_QUERY && !uuid(observationId)
+                        || ageMillis > (evidence == Evidence.ADT_QUERY ? QUERY_FRESH_MS
+                            : evidence == Evidence.PHONE_CHECK ? PHONE_CHECK_FRESH_MS : MAX_STATE_AGE_MS)))
                 throw new IllegalArgumentException("Invalid state report");
             this.request = request; this.state = state; this.availability = availability;
             this.revision = revision; this.ageMillis = ageMillis;
             this.completedRequest = completedRequest;
             this.evidence = evidence;
+            this.observationId = observationId;
         }
         public byte[] encode() {
-            return bytes("ADT-STATE/2\nSTATE\n" + request + "\n" + state + "\n" + availability + "\n" + revision + "\n" + ageMillis
-                    + "\n" + completedRequest + "\n" + evidence);
+            return bytes((evidence == Evidence.ADT_QUERY ? "ADT-STATE/3" : "ADT-STATE/2")
+                    + "\nSTATE\n" + request + "\n" + state + "\n" + availability + "\n" + revision + "\n" + ageMillis
+                    + "\n" + completedRequest + "\n" + evidence + (evidence == Evidence.ADT_QUERY ? "\n" + observationId : ""));
         }
     }
     public static Report parseReport(byte[] bytes) {
         String[] f = fields(bytes);
         if (f == null || !(f.length == 7 && "ADT-STATE/1".equals(f[0])
-                    || f.length == 9 && "ADT-STATE/2".equals(f[0])) || !"STATE".equals(f[1])
+                    || f.length == 9 && "ADT-STATE/2".equals(f[0])
+                    || f.length == 10 && "ADT-STATE/3".equals(f[0])) || !"STATE".equals(f[1])
                 || !f[6].matches("0|[1-9][0-9]{0,18}")) return null;
+        if (f.length == 10 && !Evidence.ADT_QUERY.name().equals(f[8])
+                || f.length == 9 && Evidence.ADT_QUERY.name().equals(f[8])) return null;
         try { return new Report(f[2], State.valueOf(f[3]), Availability.valueOf(f[4]), f[5], Long.parseLong(f[6]),
-                f.length == 9 ? f[7] : "-", f.length == 9 ? Evidence.valueOf(f[8]) : Evidence.ADT_NOTIFICATION); }
+                f.length >= 9 ? f[7] : "-", f.length >= 9 ? Evidence.valueOf(f[8]) : Evidence.ADT_NOTIFICATION,
+                f.length == 10 ? f[9] : "-"); }
         catch (IllegalArgumentException e) { return null; }
     }
     public static final class Tap {

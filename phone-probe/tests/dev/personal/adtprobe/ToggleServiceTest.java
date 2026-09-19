@@ -2,7 +2,6 @@ package dev.personal.adtprobe;
 
 import android.app.Application;
 import android.app.KeyguardManager;
-import android.app.Notification;
 import android.appwidget.AppWidgetHost;
 import android.appwidget.AppWidgetHostView;
 import android.appwidget.AppWidgetManager;
@@ -10,9 +9,8 @@ import android.appwidget.AppWidgetProviderInfo;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Looper;
-import android.os.Process;
 import android.os.SystemClock;
-import android.service.notification.StatusBarNotification;
+import android.provider.Settings;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -21,12 +19,8 @@ import android.widget.ProgressBar;
 import android.widget.RemoteViews;
 import android.widget.TextView;
 import com.google.android.gms.wearable.MessageEvent;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
-import java.util.Locale;
-import java.util.TimeZone;
 import java.util.UUID;
+import java.time.Duration;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -42,11 +36,12 @@ import org.robolectric.annotation.Implements;
 import org.robolectric.annotation.LooperMode;
 import org.robolectric.annotation.RealObject;
 import org.robolectric.util.ReflectionHelpers;
+import org.robolectric.shadows.ShadowSystemClock;
 import static org.junit.Assert.*;
 
 /** Real state/grant gates with synthetic local views. No ADT PendingIntent or resources exist. */
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 35, shadows = {ToggleServiceTest.HostShadow.class, PhoneAlarmStateTest.PermissionShadow.class})
+@Config(sdk = 35, shadows = ToggleServiceTest.HostShadow.class)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class ToggleServiceTest {
     private static final String NODE = RoutineAccessTest.NODE;
@@ -56,7 +51,10 @@ public final class ToggleServiceTest {
     private ArmExperimentService service;
     private WidgetHostSession inertHost;
     private Runnable validationSideEffect;
-    private TimeZone oldZone;
+    private PhoneAlarmState.Query originalQuery;
+    private PhoneAlarmState.Schedule originalSchedule;
+    private AdtPortalClient.Result queryResult;
+    private int queryCalls;
     private String request, revision, challenge;
     private int clicks;
     private int validations, rejectValidation = -1;
@@ -64,16 +62,21 @@ public final class ToggleServiceTest {
 
     @Before public void prepare() {
         context = RuntimeEnvironment.getApplication();
-        oldZone = TimeZone.getDefault(); TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
         ArmExperimentService.cancelForNavigation(context); idle();
         while (Shadows.shadowOf(context).getNextStartedService() != null) { }
         RoutineAccessTest.installValidConfiguration(context);
-        for (String name : new String[]{"connected", "reconciled", "connectionHasLatest", "storageFailed"})
-            ReflectionHelpers.setStaticField(PhoneAlarmState.class, name, false);
+        Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 1);
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "storageFailed", false);
         context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit().clear().commit();
-        PhoneAlarmStateTest.PermissionShadow.granted = true;
-        PhoneAlarmState.listenerConnecting(context);
-        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{notification("Disarmed", System.currentTimeMillis() - 120_000)});
+        assertTrue(AdtPortalSession.bind(context, "inert-system", "inert-partition"));
+        originalQuery = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "queryOperation");
+        originalSchedule = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "scheduleOperation");
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "scheduleOperation", (PhoneAlarmState.Schedule) (action, delay) -> { });
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "queryOperation", (PhoneAlarmState.Query) (app, deadline) -> {
+            queryCalls++;
+            return queryResult;
+        });
+        fresh(AlarmStateProtocol.State.DISARMED);
         revision = PhoneAlarmState.snapshot(context).revision;
         assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(true);
@@ -86,7 +89,8 @@ public final class ToggleServiceTest {
         if (controller != null) controller.destroy();
         if (inertHost != null) inertHost.close();
         RoutineAccess.disable(context); idle();
-        TimeZone.setDefault(oldZone);
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "queryOperation", originalQuery);
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "scheduleOperation", originalSchedule);
     }
 
     @Test public void tapRequiresApprovedSourceCurrentRevisionAndMatchingAction() {
@@ -106,11 +110,54 @@ public final class ToggleServiceTest {
 
     @Test public void stateChangedWhileStartWasQueuedRejectsBeforeHostCreation() {
         Intent start = queue();
-        PhoneAlarmState.posted(context, notification("Armed Stay", System.currentTimeMillis() - 1_000));
+        fresh(AlarmStateProtocol.State.ARMED_STAY);
         create(start);
         assertEquals(Boolean.TRUE, member(service, "stopped"));
         assertNull(member(service, "host"));
         assertEquals(-1L, member(service, "dispatchElapsed"));
+        assertEquals(0, clicks);
+    }
+
+    @Test public void staleTapRefreshesFromAdtAndAlreadySatisfiedActionsNeverStartAHost() {
+        int before = queryCalls;
+        queryResult = report(AlarmStateProtocol.State.ARMED_STAY);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals(before + 1, queryCalls);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
+        revision = PhoneAlarmState.snapshot(context).revision;
+        queryResult = report(AlarmStateProtocol.State.DISARMED);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.DISARM, revision));
+        noStart();
+        assertEquals(before + 2, queryCalls);
+        assertEquals(AlarmStateProtocol.State.DISARMED, PhoneAlarmState.snapshot(context).state);
+        assertEquals(0, clicks);
+    }
+
+    @Test public void invalidOrUnapprovedTapCannotReadTheAccount() {
+        int before = queryCalls;
+        receive("different-watch", AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, new byte[]{1, 2, 3});
+        assertEquals(before, queryCalls);
+        noStart();
+    }
+
+    @Test public void failedFreshReadCannotReusePreviouslyReadyStateToArm() {
+        queryResult = new AdtPortalClient.Result(AdtPortalClient.Status.UNAVAILABLE,
+            AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 10);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(0, clicks);
+    }
+
+    @Test public void revokingWatchSetupDuringTheReadPreventsNativeReadiness() {
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "queryOperation", (PhoneAlarmState.Query) (app, deadline) -> {
+            RoutineAccess.disable(context);
+            return report(AlarmStateProtocol.State.DISARMED);
+        });
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
         assertEquals(0, clicks);
     }
 
@@ -151,8 +198,7 @@ public final class ToggleServiceTest {
 
     @Test public void stateChangeDuringFinalWidgetValidationBlocksNativeActivation() {
         create(queue()); installInertReadyHost(); setChallenge();
-        validationSideEffect = () -> PhoneAlarmState.posted(context,
-            notification("Armed Stay", System.currentTimeMillis() - 1_000));
+        validationSideEffect = () -> fresh(AlarmStateProtocol.State.ARMED_STAY);
         invokeCommit();
         assertEquals(0, clicks);
         assertEquals("The one-shot is reserved before the state check, without entering the click",
@@ -169,8 +215,7 @@ public final class ToggleServiceTest {
         assertEquals(rejectValidation, validations);
         assertEquals(0, clicks);
         assertEquals(Boolean.FALSE, member(inertHost, "consumed"));
-        assertEquals(0L, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE)
-            .getLong("pending_after_ms", 0));
+        assertFalse(PhoneAlarmState.snapshot(context).pending);
         assertTrue(PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
         assertTrue(ArmExperimentService.status(context).contains("experiment rejected"));
     }
@@ -236,7 +281,8 @@ public final class ToggleServiceTest {
             assertEquals("The service permit must already be consumed", Boolean.FALSE, member(service, "authorised"));
             assertEquals("BUSY must be durably saved before entering a view listener", AlarmStateProtocol.Availability.BUSY,
                 PhoneAlarmState.snapshot(context).availability);
-            assertTrue(context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getLong("pending_after_ms", 0) > 0);
+            assertEquals("PENDING", context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getString("outcome", ""));
+            assertEquals(request, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getString("request", ""));
             clicks++;
         });
         ImageView scene = new ImageView(context); scene.setId(SCENE); view.addView(scene);
@@ -283,12 +329,15 @@ public final class ToggleServiceTest {
     }
     private byte[] tap(AlarmAction action, String value) { return new AlarmStateProtocol.Tap(action, request, value).encode(); }
     private void receive(String source, String path, byte[] bytes) {
-        ArmExperimentService.receive(context, new MessageEvent() {
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1));
+        MessageEvent event = new MessageEvent() {
             @Override public int getRequestId() { return 1; }
             @Override public String getPath() { return path; }
             @Override public byte[] getData() { return bytes; }
             @Override public String getSourceNodeId() { return source; }
-        });
+        };
+        if (AlarmStateProtocol.TOGGLE_PATH.equals(path)) WatchLinkService.receiveToggle(context, event);
+        else ArmExperimentService.receive(context, event);
         idle();
     }
     private void noStart() { assertNull(pending()); assertNull(Shadows.shadowOf(context).getNextStartedService()); }
@@ -296,14 +345,14 @@ public final class ToggleServiceTest {
     private Object member(Object object, String field) { return ReflectionHelpers.getField(object, field); }
     private void idle() { Shadows.shadowOf(Looper.getMainLooper()).idle(); }
 
-    private StatusBarNotification notification(String state, long millis) {
-        String date = DateTimeFormatter.ofPattern("HH:mm 'on' dd/MM/uuuu", Locale.UK).withZone(ZoneId.of("UTC"))
-            .format(Instant.ofEpochMilli(millis));
-        Notification notification = new Notification.Builder(context, "inert").setWhen(millis)
-            .setContentTitle("SYSTEM " + state + " (123456)")
-            .setContentText("Inert Home: SYSTEM was " + state + " at " + date + ". (123456)").build();
-        return new StatusBarNotification(PhoneAlarmState.ADT_PACKAGE, PhoneAlarmState.ADT_PACKAGE, 7, "inert", Process.myUid(), 0, 0,
-            notification, Process.myUserHandle(), millis + 1000);
+    private void fresh(AlarmStateProtocol.State state) {
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1));
+        queryResult = report(state);
+        PhoneAlarmState.refresh(context);
+    }
+    private AdtPortalClient.Result report(AlarmStateProtocol.State state) {
+        return new AdtPortalClient.Result(AdtPortalClient.Status.READY, state,
+            "inert-system", "inert-partition", "Inert Home", "Inert System", 10);
     }
 
     @Implements(AppWidgetHost.class)
