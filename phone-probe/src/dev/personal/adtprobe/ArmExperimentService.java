@@ -467,7 +467,7 @@ public final class ArmExperimentService extends Service {
         }
         if (challengeIssued || commitInFlight) return;
         if (!readinessWait.canProceed(boundNode, host != null && host.isReady(),
-                fullyLocked(), SystemClock.elapsedRealtime())) {
+                host == null ? -1 : host.renderGeneration(), fullyLocked(), SystemClock.elapsedRealtime())) {
             if (!readinessWait.hasRequest())
                 stopNow("Experiment readiness wait expired. No alarm request was sent.");
             return;
@@ -511,7 +511,7 @@ public final class ArmExperimentService extends Service {
             return;
         }
         if (!readinessWait.canProceed(boundNode, host != null && host.isReady(),
-                fullyLocked(), SystemClock.elapsedRealtime())) {
+                host == null ? -1 : host.renderGeneration(), fullyLocked(), SystemClock.elapsedRealtime())) {
             if (!readinessWait.hasRequest())
                 stopNow("Experiment readiness wait expired. No alarm request was sent.");
             return;
