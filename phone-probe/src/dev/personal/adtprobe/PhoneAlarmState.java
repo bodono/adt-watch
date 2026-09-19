@@ -96,6 +96,9 @@ final class PhoneAlarmState {
         changed(context);
     }
 
+    /** True while the listener is connected but its initial active-notification read has not succeeded. */
+    static synchronized boolean awaitingReconcile() { return connected && !reconciled; }
+
     static synchronized void reconcile(Context context, StatusBarNotification[] notifications) {
         if (!connected) return;
         Ledger ledger = read(context);
