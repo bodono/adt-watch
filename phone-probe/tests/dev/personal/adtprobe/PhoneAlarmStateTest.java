@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -277,6 +278,23 @@ public final class PhoneAlarmStateTest {
         assertEquals(1, scheduled.size());
         runNext(0);
         assertEquals(1, queries);
+    }
+    @Test public void aRecoveryTaskRunsUnderTheQueryLockAndOnlySuccessIsFollowedByARead() {
+        bind(); captureSchedule();
+        ReentrantLock lock = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "QUERY_LOCK");
+        boolean[] held = {false};
+        PhoneAlarmState.scheduleRecovery(context, () -> { held[0] = lock.isHeldByCurrentThread(); return false; });
+        assertEquals(1, scheduled.size()); runNext(0);
+        assertTrue(held[0]); assertFalse(lock.isLocked());
+        assertEquals("A failed recovery reads nothing", 0, queries);
+        assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        PhoneAlarmState.scheduleRecovery(context, () -> true);
+        runNext(0);
+        assertEquals("A successful recovery is followed by one fresh read", 1, queries);
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        PhoneAlarmState.scheduleRecovery(context, () -> { throw new IllegalStateException("inert"); });
+        runNext(0);
+        assertEquals("A throwing task neither reads nor leaks the lock", 1, queries); assertFalse(lock.isLocked());
     }
     @Test public void aPollPublishesOnlyWhenSomethingChanged() {
         bind(); PhoneAlarmState.Snapshot first = read();

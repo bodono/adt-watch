@@ -15,6 +15,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 
 /** ADT's authenticated reported state is the only authority. Notifications are refresh hints. */
 final class PhoneAlarmState {
@@ -264,6 +265,28 @@ final class PhoneAlarmState {
         }
     }
 
+    /**
+     * Runs a session-recovery task on the reads worker under the query lock, so status reads wait
+     * for it instead of colliding with its login. When it succeeds, one ordinary read stores the
+     * recovered state and the watch gets a status hint; the read that noticed the expired session
+     * has long since returned its failure.
+     */
+    static void scheduleRecovery(Context context, BooleanSupplier recovery) {
+        Context app = context.getApplicationContext();
+        scheduleOperation.after(() -> {
+            boolean locked = false, recovered = false;
+            try {
+                locked = QUERY_LOCK.tryLock(QUERY_MS, TimeUnit.MILLISECONDS);
+                if (locked) recovered = recovery.getAsBoolean();
+            } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            catch (RuntimeException ignored) { /* Recovery keeps its own closed diagnostics. */ }
+            finally { if (locked) QUERY_LOCK.unlock(); }
+            diagnostic("RECOVERY " + (recovered ? "READY" : "NONE"));
+            if (!recovered) return;
+            if (refresh(app, 0).verified) PhoneStateLink.publish(app);
+        }, 0);
+    }
+
     private static void diagnostic(String event) {
         Log.i("AdtPhoneStatus", SystemClock.elapsedRealtime() + " " + event);
     }
@@ -306,7 +329,10 @@ final class PhoneAlarmState {
             // The host that answered an authenticated read is the one to try first next time.
             if (result.status == AdtPortalClient.Status.READY || result.status == AdtPortalClient.Status.BUSY)
                 AdtPortalSession.recordVerifiedOrigin(context, portal.origin());
-            return AdtSessionRecovery.recover(context, binding, result, deadline);
+            // A signed-out answer is returned as it is; any automatic login runs afterwards with
+            // its own budget and tells the watch when the state is back.
+            else AdtSessionRecovery.recoverLater(context, binding, result);
+            return result;
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }
         finally { session.cancel(false); }
