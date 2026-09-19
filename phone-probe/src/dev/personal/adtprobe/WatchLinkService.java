@@ -41,7 +41,9 @@ public final class WatchLinkService extends WearableListenerService {
             // An unlocked phone, a session still closing or open widget setup is declined here on
             // the worker, without an ADT read. Forwarding such a tap instead would let the main
             // thread create readiness from the cached state if the phone locked in the meantime.
-            if (ArmExperimentService.cannotStartReadiness(context)) {
+            // A phone-prepared diagnostic session waiting for this very tap is the exception: it
+            // gets the tap's own read below and adopts the tap only if that read still matches.
+            if (ArmExperimentService.cannotStartReadiness(context) && !ArmExperimentService.canAdoptWatchTap(tap.action)) {
                 ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
                     AlarmStateProtocol.DeclineReason.UNAVAILABLE);
                 return;
