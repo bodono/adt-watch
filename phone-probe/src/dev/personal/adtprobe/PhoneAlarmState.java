@@ -24,6 +24,8 @@ final class PhoneAlarmState {
     static final String ADT_PACKAGE = "com.adtuk.adtukalarm";
     static final String PREFERENCES = "reported_alarm_state";
     static final long MAX_AGE_MILLIS = 24 * 60 * 60 * 1000L;
+    /** ADT writes the human-readable event time in the account's UK local time, whatever zone the phone is in. */
+    static final ZoneId ADT_ZONE = ZoneId.of("Europe/London");
     private static final Pattern TITLE = Pattern.compile("^([^\\r\\n()]+) (Disarmed|Armed Stay|Armed Away) \\(([^\\r\\n()]+)\\)$");
     private static final Pattern BODY = Pattern.compile("^([^\\r\\n]+?): ([^\\r\\n()]+) was (Disarmed|Armed Stay|Armed Away) at ([0-9]{2}:[0-9]{2}) on ([0-9]{2}/[0-9]{2}/[0-9]{4})\\. \\(([^\\r\\n()]+)\\)$");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd/MM/uuuu HH:mm", Locale.UK)
@@ -176,7 +178,7 @@ final class PhoneAlarmState {
             // Both complete text forms must agree; do not guess from a truncated or generic notification.
             if (big != null && body != null && !big.toString().equals(body.toString())) return null;
             return parseText(title == null ? null : title.toString(), body != null ? body.toString() : big == null ? null : big.toString(),
-                notification.when, now, ZoneId.systemDefault());
+                notification.when, now, ADT_ZONE);
         } catch (RuntimeException ignored) { return null; }
     }
 

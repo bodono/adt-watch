@@ -70,6 +70,19 @@ public final class PhoneAlarmStateTest {
         assertNull(PhoneAlarmState.parseText(title("Armed Stay"), body, EVENT, EVENT - 60_001, UTC));
     }
 
+    @Test public void notificationsParseInUkLocalTimeWhateverZoneThePhoneIsIn() {
+        for (String zone : new String[]{"America/New_York", "Asia/Tokyo", "Europe/London", "UTC"}) {
+            TimeZone.setDefault(TimeZone.getTimeZone(zone));
+            PhoneAlarmState.Event parsed = PhoneAlarmState.parse(notification("Armed Away", EVENT), EVENT);
+            assertNotNull("Phone zone " + zone + " must not change how ADT's UK times parse", parsed);
+            assertEquals(AlarmStateProtocol.State.ARMED_AWAY, parsed.state);
+            assertEquals(EVENT, parsed.millis);
+        }
+        assertNull("A body written for another zone still disagrees with the event timestamp",
+            PhoneAlarmState.parseText(title("Armed Away"), body("Armed Away", "Inert Home", "123456", EVENT, ZoneId.of("Asia/Tokyo")),
+                EVENT, EVENT, PhoneAlarmState.ADT_ZONE));
+    }
+
     @Test public void notificationPackageSummaryAndInconsistentExpandedTextAreIgnored() {
         StatusBarNotification event = notification("Armed Stay", EVENT);
         assertNotNull(PhoneAlarmState.parse(event, EVENT));
@@ -180,15 +193,19 @@ public final class PhoneAlarmStateTest {
 
     private static String title(String state) { return "SYSTEM " + state + " (123456)"; }
     private static String body(String state, String home, String account, long millis) {
-        DateTimeFormatter date = DateTimeFormatter.ofPattern("HH:mm 'on' dd/MM/uuuu", Locale.UK).withZone(UTC);
+        return body(state, home, account, millis, UTC);
+    }
+    private static String body(String state, String home, String account, long millis, ZoneId zone) {
+        DateTimeFormatter date = DateTimeFormatter.ofPattern("HH:mm 'on' dd/MM/uuuu", Locale.UK).withZone(zone);
         return home + ": SYSTEM was " + state + " at " + date.format(Instant.ofEpochMilli(millis)) + ". (" + account + ")";
     }
     private static PhoneAlarmState.Event parse(String state, String home, String account, long millis) {
         return PhoneAlarmState.parseText("SYSTEM " + state + " (" + account + ")", body(state, home, account, millis), millis, millis, UTC);
     }
     private StatusBarNotification notification(String state, long millis) {
-        Notification notification = new Notification.Builder(context, "inert")
-            .setContentTitle(title(state)).setContentText(body(state, "Inert Home", "123456", millis)).setWhen(millis).build();
+        // Real ADT notifications carry the UK local time, whatever zone the phone happens to be in.
+        Notification notification = new Notification.Builder(context, "inert").setContentTitle(title(state))
+            .setContentText(body(state, "Inert Home", "123456", millis, PhoneAlarmState.ADT_ZONE)).setWhen(millis).build();
         return new StatusBarNotification(PhoneAlarmState.ADT_PACKAGE, PhoneAlarmState.ADT_PACKAGE, 7, "inert", Process.myUid(), 0, 0,
             notification, Process.myUserHandle(), millis + 1000);
     }

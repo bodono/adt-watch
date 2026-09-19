@@ -20,7 +20,6 @@ import android.widget.ProgressBar;
 import android.widget.RemoteViews;
 import com.google.android.gms.wearable.MessageEvent;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.TimeZone;
@@ -240,7 +239,7 @@ public final class ToggleServiceTest {
     private void idle() { Shadows.shadowOf(Looper.getMainLooper()).idle(); }
 
     private StatusBarNotification notification(String state, long millis) {
-        String date = DateTimeFormatter.ofPattern("HH:mm 'on' dd/MM/uuuu", Locale.UK).withZone(ZoneId.of("UTC"))
+        String date = DateTimeFormatter.ofPattern("HH:mm 'on' dd/MM/uuuu", Locale.UK).withZone(PhoneAlarmState.ADT_ZONE)
             .format(Instant.ofEpochMilli(millis));
         Notification notification = new Notification.Builder(context, "inert").setWhen(millis)
             .setContentTitle("SYSTEM " + state + " (123456)")

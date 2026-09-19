@@ -42,7 +42,8 @@ to ADT.
 
 User-enabled Android notification access feeds `PhoneAlarmState`. The parser
 accepts exact, internally consistent English alarm reports from the supported
-UK ADT package/version. It retains normalized state, event timing, a hashed
+UK ADT package/version, reading their human-readable times as UK local time so
+the phone can travel. It retains normalized state, event timing, a hashed
 alarm scope, revisions and pending bookkeeping. Raw notification bodies and
 account/home labels are not stored or sent to the watch.
 
