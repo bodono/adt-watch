@@ -27,10 +27,25 @@ public final class WatchLinkService extends WearableListenerService {
         if (context == null || event == null) return;
         try {
             if (!AlarmStateProtocol.TOGGLE_PATH.equals(event.getPath())
-                    || !WatchProtocol.validNodeId(event.getSourceNodeId())
-                    || AlarmStateProtocol.parseTap(event.getData()) == null) return;
+                    || !WatchProtocol.validNodeId(event.getSourceNodeId())) return;
+            AlarmStateProtocol.Tap tap = AlarmStateProtocol.parseTap(event.getData());
+            if (tap == null) return;
             RoutineAccess.Snapshot permission = RoutineAccess.snapshot(context);
-            if (permission == null || !permission.nodeId.equals(event.getSourceNodeId())) return;
+            if (permission == null) {
+                // Like the SETUP status reply, any node learns that no watch is approved here.
+                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
+                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                return;
+            }
+            if (!permission.nodeId.equals(event.getSourceNodeId())) return;
+            // An unlocked phone, a session still closing or open widget setup is declined here on
+            // the worker, without an ADT read. Forwarding such a tap instead would let the main
+            // thread create readiness from the cached state if the phone locked in the meantime.
+            if (ArmExperimentService.cannotStartReadiness(context)) {
+                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
+                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                return;
+            }
             PhoneAlarmState.refresh(context);
             // receive rechecks setup after the network read and again immediately before activation.
             ArmExperimentService.receive(context, event);

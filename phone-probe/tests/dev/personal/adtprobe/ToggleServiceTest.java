@@ -19,6 +19,8 @@ import android.widget.ProgressBar;
 import android.widget.RemoteViews;
 import android.widget.TextView;
 import com.google.android.gms.wearable.MessageEvent;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.time.Duration;
 import org.junit.After;
@@ -57,6 +59,8 @@ public final class ToggleServiceTest {
     private int queryCalls;
     private String request, revision, challenge;
     private int clicks;
+    private final List<Decline> declines = new ArrayList<>();
+    private ArmExperimentService.Responder originalResponder;
     private int validations, rejectValidation = -1;
     private boolean falseAfterClick, throwAfterClick;
 
@@ -82,9 +86,16 @@ public final class ToggleServiceTest {
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(true);
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(true);
         request = UUID.randomUUID().toString(); challenge = UUID.randomUUID().toString();
+        originalResponder = ReflectionHelpers.getStaticField(ArmExperimentService.class, "responder");
+        ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder",
+            (ArmExperimentService.Responder) (ignored, node, path, payload) -> {
+                assertEquals(AlarmStateProtocol.DECLINED_PATH, path);
+                declines.add(new Decline(node, AlarmStateProtocol.parseDeclined(payload)));
+            });
     }
 
     @After public void close() {
+        ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder", originalResponder);
         ArmExperimentService.cancelForNavigation(context);
         if (controller != null) controller.destroy();
         if (inertHost != null) inertHost.close();
@@ -139,7 +150,54 @@ public final class ToggleServiceTest {
         receive("different-watch", AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, new byte[]{1, 2, 3});
         assertEquals(before, queryCalls);
+        assertTrue("An unapproved node gets no reply of any kind", declines.isEmpty());
         noStart();
+    }
+
+    @Test public void unlockedPhoneOrBusySessionIsDeclinedBeforeAnyAdtRead() {
+        int before = queryCalls;
+        locked(false);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals("No ADT read precedes a tap the phone cannot serve", before, queryCalls);
+        assertEquals(1, declines.size());
+        assertEquals(NODE, declines.get(0).node);
+        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(request, declines.get(0).refusal.request);
+        locked(true);
+        assertNotNull(queue());
+        int during = queryCalls;
+        String other = UUID.randomUUID().toString();
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, new AlarmStateProtocol.Tap(AlarmAction.ARM_STAY, other, revision).encode());
+        assertEquals("A tap during a queued session is declined without a read", during, queryCalls);
+        assertEquals(2, declines.size());
+        assertEquals(other, declines.get(1).refusal.request);
+    }
+
+    @Test public void aTapRefusedOnTheWorkerCannotBecomeAGrantOnceThePhoneLocks() {
+        int before = queryCalls;
+        queryResult = report(AlarmStateProtocol.State.ARMED_AWAY);
+        locked(false);
+        // The listener worker answers before the main thread runs; the phone locks in between.
+        WatchLinkService.receiveToggle(context, event(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision)));
+        locked(true);
+        idle();
+        noStart();
+        assertEquals("The skipped preflight cannot be replaced by the cached state", before, queryCalls);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.State.DISARMED, PhoneAlarmState.snapshot(context).state);
+    }
+
+    @Test public void tapWithoutApprovedWatchAccessIsDeclinedInsteadOfIgnored() {
+        RoutineAccess.disable(context);
+        int before = queryCalls;
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals(before, queryCalls);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmAction.ARM_STAY, declines.get(0).refusal.action);
     }
 
     @Test public void failedFreshReadCannotReusePreviouslyReadyStateToArm() {
@@ -354,17 +412,28 @@ public final class ToggleServiceTest {
         Intent result = Shadows.shadowOf(context).getNextStartedService(); assertNotNull(result); return result;
     }
     private byte[] tap(AlarmAction action, String value) { return new AlarmStateProtocol.Tap(action, request, value).encode(); }
+    private static final class Decline {
+        final String node; final AlarmStateProtocol.Declined refusal;
+        Decline(String node, AlarmStateProtocol.Declined refusal) { this.node = node; this.refusal = refusal; assertNotNull(refusal); }
+    }
     private void receive(String source, String path, byte[] bytes) {
+        MessageEvent event = event(source, path, bytes);
+        if (AlarmStateProtocol.TOGGLE_PATH.equals(path)) WatchLinkService.receiveToggle(context, event);
+        else ArmExperimentService.receive(context, event);
+        idle();
+    }
+    private MessageEvent event(String source, String path, byte[] bytes) {
         ShadowSystemClock.advanceBy(Duration.ofMillis(1));
-        MessageEvent event = new MessageEvent() {
+        return new MessageEvent() {
             @Override public int getRequestId() { return 1; }
             @Override public String getPath() { return path; }
             @Override public byte[] getData() { return bytes; }
             @Override public String getSourceNodeId() { return source; }
         };
-        if (AlarmStateProtocol.TOGGLE_PATH.equals(path)) WatchLinkService.receiveToggle(context, event);
-        else ArmExperimentService.receive(context, event);
-        idle();
+    }
+    private void locked(boolean value) {
+        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(value);
+        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(value);
     }
     private void noStart() { assertNull(pending()); assertNull(Shadows.shadowOf(context).getNextStartedService()); }
     private Object pending() { return ReflectionHelpers.getStaticField(ArmExperimentService.class, "pending"); }
