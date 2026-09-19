@@ -165,44 +165,13 @@ final class AdtPortalClient {
                 systemId = resourceId(selected.get("id"));
             }
 
-            JSONObject system = object(fetch("/web/api/systems/systems/" + systemId, deadline, Stage.SYSTEM, diagnostic), "data");
-            requireType(system, "systems/system");
-            if (!systemId.equals(resourceId(system.get("id")))) throw new Failure(Status.AMBIGUOUS);
+            JSONObject system = fetchSystem(systemId, deadline, diagnostic);
             String systemLabel = label(object(system, "attributes"));
-            JSONObject partitionLinks = object(object(system, "relationships"), "partitions");
-            JSONArray partitions = array(partitionLinks, "data");
-            if (partitions.length() > 1) throw new Failure(Status.AMBIGUOUS);
-            if (partitions.length() != 1) throw new Failure(Status.UNSUPPORTED);
-            JSONObject partitionLink = object(partitions.get(0));
-            requireType(partitionLink, "devices/partition");
-            String partitionId = partitionId(partitionLink.get("id"));
+            String partitionId = solePartitionId(system);
             if (bound && !partitionId.equals(expectedPartitionId)) throw new Failure(Status.AMBIGUOUS);
 
             JSONObject partition = object(fetch("/web/api/devices/partitions/" + partitionId, deadline, Stage.PARTITION, diagnostic), "data");
-            requireType(partition, "devices/partition");
-            if (!partitionId.equals(partitionId(partition.get("id")))) throw new Failure(Status.AMBIGUOUS);
-            // Some portal versions also include the explicit owning-system relationship.
-            if (partition.has("relationships")) {
-                JSONObject relationships = object(partition, "relationships");
-                if (relationships.has("system")) {
-                    JSONObject owner = object(object(relationships, "system"), "data");
-                    requireType(owner, "systems/system");
-                    if (!systemId.equals(resourceId(owner.get("id")))) throw new Failure(Status.AMBIGUOUS);
-                }
-            }
-            JSONObject attributes = object(partition, "attributes");
-            if (!booleanValue(attributes.get("hasState"))) throw new Failure(Status.UNSUPPORTED);
-            String partitionLabel = label(attributes);
-            int actual = integer(attributes.get("state")), desired = integer(attributes.get("desiredState"));
-            if (actual < 1 || actual > 3 || desired < 0 || desired > 4) throw new Failure(Status.UNSUPPORTED);
-            Boolean loading = attributes.has("loading") ? booleanValue(attributes.get("loading")) : null;
-            checkDeadline(deadline);
-            AlarmStateProtocol.State state = actual == 1 ? AlarmStateProtocol.State.DISARMED
-                : actual == 2 ? AlarmStateProtocol.State.ARMED_STAY : AlarmStateProtocol.State.ARMED_AWAY;
-            // A different desired state can outlive a failed command; only explicit loading means busy.
-            Status status = Boolean.TRUE.equals(loading) ? Status.BUSY : Status.READY;
-            return new Result(status, state, systemId, partitionId, systemLabel, partitionLabel, elapsed(started),
-                actual, desired, loading, diagnostic.stage, Reason.NONE, diagnostic.http);
+            return partitionResult(partition, systemId, partitionId, systemLabel, started, deadline, diagnostic);
         } catch (Failure failure) {
             return failed(failure.status, started, diagnostic, failure.reason);
         } catch (IOException failure) {
@@ -219,6 +188,96 @@ final class AdtPortalClient {
             // Worker-only disk flush preserves rotated login cookies across process death.
             if (session != null) try { session.persist(); } catch (RuntimeException ignored) { }
         }
+    }
+
+    /**
+     * Routine read of the partition chosen at setup. queryBound proves membership in the saved
+     * system with two reads; repeating that on every status check doubled the round trips the
+     * watch waited for. A partition response that names the saved system as its owner proves the
+     * binding by itself. One without that relationship is followed by the same system read
+     * queryBound makes, so the saved system id is never merely assumed for a response.
+     */
+    Result status(String expectedSystemId, String expectedPartitionId, long deadlineElapsed) {
+        long started = clock.elapsed();
+        long deadline = Math.min(deadlineElapsed, started > Long.MAX_VALUE - MAX_QUERY_MS
+                ? Long.MAX_VALUE : started + MAX_QUERY_MS);
+        Diagnostic diagnostic = new Diagnostic();
+        try {
+            if (session == null) throw new Failure(Status.UNAVAILABLE, Reason.SESSION);
+            if (started < 0 || deadline <= started) throw new Failure(Status.UNAVAILABLE, Reason.TIMEOUT);
+            String systemId = resourceId(expectedSystemId), partitionId = resourceId(expectedPartitionId);
+            JSONObject partition = object(fetch("/web/api/devices/partitions/" + partitionId, deadline, Stage.PARTITION, diagnostic), "data");
+            requireType(partition, "devices/partition");
+            if (!partitionId.equals(partitionId(partition.get("id")))) throw new Failure(Status.AMBIGUOUS);
+            String systemLabel = "";
+            if (!ownerProven(partition, systemId)) {
+                JSONObject system = fetchSystem(systemId, deadline, diagnostic);
+                if (!partitionId.equals(solePartitionId(system))) throw new Failure(Status.AMBIGUOUS);
+                systemLabel = label(object(system, "attributes"));
+            }
+            return partitionResult(partition, systemId, partitionId, systemLabel, started, deadline, diagnostic);
+        } catch (Failure failure) {
+            return failed(failure.status, started, diagnostic, failure.reason);
+        } catch (IOException failure) {
+            Reason reason = ioReason(failure);
+            if (failure instanceof PortalIOException) {
+                reason = ((PortalIOException) failure).reason;
+                diagnostic.http = ((PortalIOException) failure).http;
+            }
+            return failed(Status.UNAVAILABLE, started, diagnostic, reason);
+        } catch (JSONException | RuntimeException ignored) {
+            return failed(Status.UNSUPPORTED, started, diagnostic, Reason.SCHEMA);
+        } finally {
+            if (session != null) try { session.persist(); } catch (RuntimeException ignored) { }
+        }
+    }
+
+    private Result partitionResult(JSONObject partition, String systemId, String partitionId, String systemLabel,
+            long started, long deadline, Diagnostic diagnostic) throws Failure, JSONException {
+        requireType(partition, "devices/partition");
+        if (!partitionId.equals(partitionId(partition.get("id")))) throw new Failure(Status.AMBIGUOUS);
+        ownerProven(partition, systemId);
+        JSONObject attributes = object(partition, "attributes");
+        if (!booleanValue(attributes.get("hasState"))) throw new Failure(Status.UNSUPPORTED);
+        String partitionLabel = label(attributes);
+        int actual = integer(attributes.get("state")), desired = integer(attributes.get("desiredState"));
+        if (actual < 1 || actual > 3 || desired < 0 || desired > 4) throw new Failure(Status.UNSUPPORTED);
+        Boolean loading = attributes.has("loading") ? booleanValue(attributes.get("loading")) : null;
+        checkDeadline(deadline);
+        AlarmStateProtocol.State state = actual == 1 ? AlarmStateProtocol.State.DISARMED
+            : actual == 2 ? AlarmStateProtocol.State.ARMED_STAY : AlarmStateProtocol.State.ARMED_AWAY;
+        // A different desired state can outlive a failed command; only explicit loading means busy.
+        Status status = Boolean.TRUE.equals(loading) ? Status.BUSY : Status.READY;
+        return new Result(status, state, systemId, partitionId, systemLabel, partitionLabel, elapsed(started),
+            actual, desired, loading, diagnostic.stage, Reason.NONE, diagnostic.http);
+    }
+
+    /** Whether the partition response names the expected owning system; a different owner is refused. */
+    private static boolean ownerProven(JSONObject partition, String systemId) throws Failure, JSONException {
+        if (!partition.has("relationships")) return false;
+        JSONObject relationships = object(partition, "relationships");
+        if (!relationships.has("system")) return false;
+        JSONObject owner = object(object(relationships, "system"), "data");
+        requireType(owner, "systems/system");
+        if (!systemId.equals(resourceId(owner.get("id")))) throw new Failure(Status.AMBIGUOUS);
+        return true;
+    }
+
+    private JSONObject fetchSystem(String systemId, long deadline, Diagnostic diagnostic) throws Failure, IOException, JSONException {
+        JSONObject system = object(fetch("/web/api/systems/systems/" + systemId, deadline, Stage.SYSTEM, diagnostic), "data");
+        requireType(system, "systems/system");
+        if (!systemId.equals(resourceId(system.get("id")))) throw new Failure(Status.AMBIGUOUS);
+        return system;
+    }
+
+    /** The system must list exactly one partition; that is the only partition this client supports. */
+    private static String solePartitionId(JSONObject system) throws Failure, JSONException {
+        JSONArray partitions = array(object(object(system, "relationships"), "partitions"), "data");
+        if (partitions.length() > 1) throw new Failure(Status.AMBIGUOUS);
+        if (partitions.length() != 1) throw new Failure(Status.UNSUPPORTED);
+        JSONObject partitionLink = object(partitions.get(0));
+        requireType(partitionLink, "devices/partition");
+        return partitionId(partitionLink.get("id"));
     }
 
     private JSONObject fetch(String path, long deadline, Stage stage, Diagnostic diagnostic) throws Failure, IOException, JSONException {

@@ -36,7 +36,10 @@ signing in again on the phone.
 The status client uses a fixed, read-only part of Alarm.com's website API. This
 is an unofficial integration, not a supported public ADT API. It supports one
 system with one partition, selected explicitly during setup. That must be the
-same home controlled by both configured scene widgets.
+same home controlled by both configured scene widgets. Routine status checks
+read only that partition when its response names the saved system as its
+owner; otherwise they also read the saved system to prove the partition is its
+sole partition.
 
 App/Tile status checks and **Refresh** ask the phone to query ADT. The colour
 comes from ADT's reported actual state; notification messages are only hints to

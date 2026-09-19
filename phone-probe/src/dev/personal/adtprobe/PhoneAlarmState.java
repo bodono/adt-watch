@@ -243,8 +243,10 @@ final class PhoneAlarmState {
             if (remaining <= 0) return null;
             AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
             if (binding == null) return null;
+            // One round trip when the partition names the saved system as its owner; the client
+            // itself reads the saved system to prove the binding when it does not.
             return new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS))
-                .queryBound(binding.systemId, binding.partitionId, deadline);
+                .status(binding.systemId, binding.partitionId, deadline);
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }
         finally { session.cancel(false); }
