@@ -43,6 +43,10 @@ public final class ArmExperimentService extends Service {
     private static final RoutinePrepareReplayGuard RECENT_PREPARES = new RoutinePrepareReplayGuard();
     private static volatile ArmExperimentService active;
     private static volatile StartGrant pending;
+    /** Transport for a pre-challenge decline; inert tests replace it. A decline carries no authority. */
+    interface Responder { void send(Context context, String node, String path, byte[] payload); }
+    private static volatile Responder responder = (context, node, path, payload) ->
+        Wearable.getMessageClient(context).sendMessage(node, path, payload);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Executor mainExecutor = command -> handler.post(() -> runCallback(command));
@@ -195,7 +199,10 @@ public final class ArmExperimentService extends Service {
             ArmExperimentService current = active;
             if (current != null && !current.stopped && !current.finishing) {
                 // A new toggle may never adopt an unrelated already-prepared session.
-                if (toggleRevision != null) return;
+                if (toggleRevision != null) {
+                    if (app != null && !current.serves(source, message.requestId)) decline(app, source, message);
+                    return;
+                }
                 try { current.handle(source, message); }
                 catch (RuntimeException error) {
                     current.stopNow("Experiment message handling failed. No authorization remains; alarm state is unverified.");
@@ -213,10 +220,22 @@ public final class ArmExperimentService extends Service {
     private static void startRoutineReadiness(Context app, String source, ArmExperimentProtocol.Message message,
             String toggleRevision) {
         requireMain();
-        if (message.kind != ArmExperimentProtocol.Kind.PREPARE || isRunning()
-                || !phoneLocked(app) || WidgetSetupActivity.hasListeningHost()) return;
+        if (message.kind != ArmExperimentProtocol.Kind.PREPARE) return;
         RoutineAccess.Snapshot permission = RoutineAccess.snapshot(app);
-        if (permission == null || !permission.nodeId.equals(source)) return;
+        if (permission != null && !permission.nodeId.equals(source)) return; // An unapproved node gets no reply.
+        if (isRunning()) {
+            ArmExperimentService current = active;
+            boolean served = queuedFor(source, message.requestId)
+                || current != null && !current.stopped && current.serves(source, message.requestId);
+            if (!served) decline(app, source, message);
+            return;
+        }
+        if (permission == null || !phoneLocked(app) || WidgetSetupActivity.hasListeningHost()) {
+            // Answer now: silently dropping the request left the watch waiting out its ten-second
+            // deadline and then blaming the connection ("Phone unavailable").
+            decline(app, source, message);
+            return;
+        }
         if (toggleRevision != null && !PhoneAlarmState.matches(app, toggleRevision, message.action)) {
             PhoneStateLink.publish(app); return;
         }
@@ -239,6 +258,28 @@ public final class ArmExperimentService extends Service {
             writeStatus(app, "Android could not start watch readiness. No alarm request was sent.");
             Probe.event(app, "Routine readiness startup unavailable; no retry.");
         }
+    }
+
+    /** Tells the watch at once that no readiness session will start. The challenge id is a placeholder. */
+    private static void decline(Context app, String source, ArmExperimentProtocol.Message message) {
+        try {
+            responder.send(app, source, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(
+                message.action, message.requestId, UUID.randomUUID().toString(), ArmExperimentProtocol.Outcome.REJECTED));
+            Probe.event(app, "Watch request declined before readiness; no alarm request was sent.");
+        } catch (RuntimeException ignored) { /* The watch's own deadline still ends its attempt. */ }
+    }
+
+    private static boolean queuedFor(String source, String request) {
+        StartGrant queued = pending;
+        return queued != null && queued.routine != null && queued.routine.nodeId.equals(source)
+            && request.equals(queued.initialRequest);
+    }
+
+    /** True when this session already belongs to the given watch request, so a repeat needs no decline. */
+    private boolean serves(String source, String request) {
+        return source.equals(boundNode) && (request.equals(requestId)
+            || grant != null && request.equals(grant.initialRequest)
+            || readinessWait.matchesNode(source) && request.equals(readinessWait.requestId()));
     }
 
     @Override public void onCreate() {

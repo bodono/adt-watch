@@ -18,8 +18,11 @@ respected. The app does not automatically retry an alarm request.
 
 The paired phone is required: keep it powered, **locked**, connected and signed
 into ADT. Set the **ADT app's battery usage to Unrestricted** so Android allows
-its queued work to run. Installation uses a computer; everyday use needs no
-computer or USB cable.
+its queued work to run. If the phone cannot take a request (it is unlocked,
+still finishing an earlier request, or widget setup is open), the watch says
+**Phone declined** straight away instead of waiting out its ten-second
+deadline; the notice stays until your next tap or Refresh. Installation uses a
+computer; everyday use needs no computer or USB cable.
 
 The colour comes from ADT's latest accepted alarm-state notification, with its
 age shown on the watch. It is not a continuous live reading. Sending a request

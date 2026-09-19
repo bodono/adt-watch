@@ -24,6 +24,11 @@ state revision. A Tile supplies a short-lived, one-use launch token for that sam
 action; rendering, plain launches and restored launch history do not authorize
 commands. The phone validates routine access, source, action, reported state and
 lock state before a readiness request can start its bounded 30-second service.
+A request it cannot take (unlocked phone, a session still closing, widget setup
+open, or no routine access) is declined immediately with a rejection that the
+watch accepts before any challenge, so the watch reports it within a round trip
+instead of at its ten-second deadline. Only an unapproved node gets no reply,
+and a changed reported state is answered with a status hint instead.
 
 The phone prepares the matching widget and returns a challenge. The watch's
 still-valid tap authorizes one matching commit automatically. This protocol

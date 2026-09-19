@@ -22,6 +22,8 @@ import com.google.android.gms.wearable.MessageEvent;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -57,6 +59,8 @@ public final class ToggleServiceTest {
     private TimeZone oldZone;
     private String request, revision, challenge;
     private int clicks;
+    private final List<Decline> declines = new ArrayList<>();
+    private ArmExperimentService.Responder originalResponder;
 
     @Before public void prepare() {
         context = RuntimeEnvironment.getApplication();
@@ -75,9 +79,16 @@ public final class ToggleServiceTest {
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(true);
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(true);
         request = UUID.randomUUID().toString(); challenge = UUID.randomUUID().toString();
+        originalResponder = ReflectionHelpers.getStaticField(ArmExperimentService.class, "responder");
+        ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder",
+            (ArmExperimentService.Responder) (ignored, node, path, payload) -> {
+                assertEquals(ArmExperimentProtocol.RESULT_PATH, path);
+                declines.add(new Decline(node, ArmExperimentProtocol.parse(payload, ArmExperimentProtocol.Kind.RESULT)));
+            });
     }
 
     @After public void close() {
+        ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder", originalResponder);
         ArmExperimentService.cancelForNavigation(context);
         if (controller != null) controller.destroy();
         if (inertHost != null) inertHost.close();
@@ -98,6 +109,41 @@ public final class ToggleServiceTest {
         assertEquals(AlarmAction.ARM_STAY, member(grant, "action"));
         assertEquals(request, member(grant, "initialRequest"));
         assertTrue(start.getExtras() == null || start.getExtras().isEmpty());
+    }
+
+    @Test public void unlockedPhoneDeclinesAtOnceInsteadOfLettingTheWatchTimeOut() {
+        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(false);
+        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(false);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals(1, declines.size());
+        assertEquals(NODE, declines.get(0).node);
+        assertNotNull(declines.get(0).result);
+        assertEquals(ArmExperimentProtocol.Outcome.REJECTED, declines.get(0).result.outcome);
+        assertEquals(request, declines.get(0).result.requestId);
+        assertEquals(AlarmAction.ARM_STAY, declines.get(0).result.action);
+        assertTrue("A decline consumes nothing", PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
+    }
+
+    @Test public void declinesCoverMissingSetupAndBusySessionsButNotUnapprovedNodesOrTheServedRequest() {
+        RoutineAccess.disable(context);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision)); noStart();
+        assertEquals("No routine access is declined, like the SETUP status reply", 1, declines.size());
+        RoutineAccessTest.installValidConfiguration(context);
+        receive("different-watch", AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision)); noStart();
+        assertEquals("An unapproved node gets no reply of any kind", 1, declines.size());
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.DISARM, revision)); noStart();
+        assertEquals("A state mismatch is answered with a status hint, not a decline", 1, declines.size());
+        Intent start = queue();
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        assertEquals("A repeat of the request being served is not declined", 1, declines.size());
+        assertNotNull(pending());
+        String other = UUID.randomUUID().toString();
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, new AlarmStateProtocol.Tap(AlarmAction.ARM_STAY, other, revision).encode());
+        assertEquals("A different request while one is queued is declined", 2, declines.size());
+        assertEquals(other, declines.get(1).result.requestId);
+        assertNotNull(start);
+        assertNull(Shadows.shadowOf(context).getNextStartedService());
     }
 
     @Test public void stateChangedWhileStartWasQueuedRejectsBeforeHostCreation() {
@@ -225,6 +271,10 @@ public final class ToggleServiceTest {
         Intent result = Shadows.shadowOf(context).getNextStartedService(); assertNotNull(result); return result;
     }
     private byte[] tap(AlarmAction action, String value) { return new AlarmStateProtocol.Tap(action, request, value).encode(); }
+    private static final class Decline {
+        final String node; final ArmExperimentProtocol.Message result;
+        Decline(String node, ArmExperimentProtocol.Message result) { this.node = node; this.result = result; }
+    }
     private void receive(String source, String path, byte[] bytes) {
         ArmExperimentService.receive(context, new MessageEvent() {
             @Override public int getRequestId() { return 1; }

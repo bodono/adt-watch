@@ -13,7 +13,8 @@ not execute an alarm command.
 
 A watch PIN or pattern is optional. An existing system lock is respected, and
 the app must remain visible and focused while sending. There are no automatic
-alarm retries. **Refresh** reads phone status without operating the alarm; only
+alarm retries. A phone decline is shown as a notice that stays until the next
+tap or Refresh. **Refresh** reads phone status without operating the alarm; only
 a newer accepted ADT report can resolve a pending result. App/Tile entry and
 completed attempts start a read-only recovery period of up to 30 seconds,
 retrying failed or incomplete status checks without repeating the alarm action.

@@ -165,8 +165,23 @@ public final class ArmExperimentProtocolTest {
             "An expired challenge stays expired rather than accepting a late outcome");
 
         attempt = awaiting(action);
-        check(!attempt.acceptResult(examples[4], NODE, START + 3),
-            "A rejection without an accepted challenge is ignored");
+        check(!attempt.acceptResult(examples[3], NODE, START + 3),
+            "A REQUESTED result without an accepted challenge is ignored");
+        check(!attempt.acceptResult(examples[4], "second-node", START + 3),
+            "A pre-challenge rejection from another source is ignored");
+        check(!attempt.acceptResult(ArmExperimentProtocol.encodeResult(other, REQUEST, CHALLENGE,
+            ArmExperimentProtocol.Outcome.REJECTED), NODE, START + 3),
+            "A pre-challenge rejection for the other action is ignored");
+        check(!attempt.acceptResult(ArmExperimentProtocol.encodeResult(action, OTHER_REQUEST, CHALLENGE,
+            ArmExperimentProtocol.Outcome.REJECTED), NODE, START + 3),
+            "A pre-challenge rejection for another request is ignored");
+        check(attempt.acceptResult(examples[4], NODE, START + 3),
+            "The phone can decline before issuing a challenge; its challenge id is then a placeholder");
+        check(attempt.outcome() == ArmExperimentProtocol.Outcome.REJECTED
+            && attempt.phase() == ArmExperimentProtocol.Phase.FINISHED && attempt.challengeId() == null,
+            "A pre-challenge decline is terminal and records no challenge");
+        check(!attempt.acceptChallenge(examples[1], NODE, START + 4), "A declined attempt cannot accept a later challenge");
+        check(attempt.commit(START + 4) == null, "A declined attempt cannot commit");
 
         attempt = awaiting(action);
         check(!attempt.acceptChallenge(examples[1], NODE, START + ArmExperimentProtocol.READINESS_TIMEOUT_MS),

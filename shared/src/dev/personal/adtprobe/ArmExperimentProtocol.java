@@ -204,12 +204,16 @@ public final class ArmExperimentProtocol {
         }
 
         public synchronized boolean acceptResult(byte[] payload, String source, long now) {
-            if (!isActive(now) || (phase != Phase.AWAITING_RESULT && phase != Phase.CONFIRMABLE)
-                    || !target.equals(source)) return false;
+            if (!isActive(now) || (phase != Phase.AWAITING_RESULT && phase != Phase.CONFIRMABLE
+                    && phase != Phase.AWAITING_CHALLENGE) || !target.equals(source)) return false;
             Message message = parse(payload, Kind.RESULT);
-            if (message == null || action != message.action || !request.equals(message.requestId)
-                    || !challenge.equals(message.challengeId)) return false;
-            // The phone may revoke an issued challenge before the watch confirms it.
+            if (message == null || action != message.action || !request.equals(message.requestId)) return false;
+            if (phase == Phase.AWAITING_CHALLENGE) {
+                // The phone may decline before issuing any challenge (unlocked, busy, setup open).
+                // Its challenge id is then a placeholder; only a rejection is meaningful.
+                if (message.outcome != Outcome.REJECTED) return false;
+            } else if (!challenge.equals(message.challengeId)) return false;
+            // The phone may also revoke an issued challenge before the watch confirms it.
             // Only rejection is meaningful then; REQUESTED still requires our prior commit.
             if (phase == Phase.CONFIRMABLE && message.outcome != Outcome.REJECTED) return false;
             outcome = message.outcome;

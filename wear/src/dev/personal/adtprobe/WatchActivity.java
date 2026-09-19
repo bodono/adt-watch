@@ -28,7 +28,7 @@ public final class WatchActivity extends Activity {
     private int generation;
     private ArmExperimentProtocol.Attempt attempt;
     private WatchAlarmStore.Selection selection;
-    private String displayedToken, feedback, tileAction, tileToken;
+    private String displayedToken, feedback, notice, tileAction, tileToken;
     private long tileUntil;
     private SharedPreferences preferences;
     private final SharedPreferences.OnSharedPreferenceChangeListener changed = (prefs, key) -> handler.post(() -> {
@@ -54,7 +54,7 @@ public final class WatchActivity extends Activity {
         sender = (node, path, payload, failure) -> client.sendMessage(node, path, payload)
             .addOnFailureListener(error -> handler.post(failure));
         controls = new AlarmToggleView(this, this::onAlarmTap, () -> {
-            if (attempt == null) { feedback = null; WatchAlarmStore.refresh(this); render(); }
+            if (attempt == null) { feedback = null; notice = null; WatchAlarmStore.refresh(this); render(); }
         });
         setContentView(controls);
         controls.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -74,6 +74,7 @@ public final class WatchActivity extends Activity {
         String token = intent.getStringExtra(AlarmTileService.EXTRA_TILE_REVISION);
         intent.removeExtra(AlarmTileService.EXTRA_TILE_ACTION); intent.removeExtra(AlarmTileService.EXTRA_TILE_REVISION);
         if (!freshLaunch || attempt != null || (intent.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return;
+        notice = null;
         if (AlarmTileService.ACTION_REFRESH.equals(action)) { WatchAlarmStore.refresh(this); return; }
         if (!(AlarmAction.ARM_STAY.name().equals(action) || AlarmAction.DISARM.name().equals(action))
                 || !AlarmStateProtocol.uuid(token)) return;
@@ -97,6 +98,7 @@ public final class WatchActivity extends Activity {
     private void onAlarmTap(AlarmAction action) { begin(action, displayedToken); }
     private void begin(AlarmAction action, String token) {
         if (!interactive() || attempt != null || action == null) return;
+        notice = null;
         WatchAlarmStore.Selection chosen = WatchAlarmStore.consume(this, token, action);
         if (chosen == null) { feedback = "Status changed. Refreshing…"; WatchAlarmStore.refresh(this); render(); return; }
         selection = chosen; commandSent = false;
@@ -127,8 +129,12 @@ public final class WatchActivity extends Activity {
                 () -> { if (attempt == started) endAttempt("Check ADT for the result.", true); });
         } else if (ArmExperimentProtocol.RESULT_PATH.equals(event.getPath())
                 && started.acceptResult(event.getData(), event.getSourceNodeId(), now)) {
-            boolean requested = started.outcome() == ArmExperimentProtocol.Outcome.REQUESTED;
-            endAttempt(requested ? null : "Request declined. Refreshing…", requested);
+            if (started.outcome() == ArmExperimentProtocol.Outcome.REQUESTED) { endAttempt(null, true); return; }
+            // A decline stays visible until the next tap or refresh. Transient feedback was wiped by
+            // the status refresh that follows within a second, before it could be read.
+            notice = started.challengeId() == null ? "Phone declined. Lock the phone, then retry."
+                : "Phone declined the request. Check ADT.";
+            endAttempt(null, false);
         }
     }
     private void send(String node, String path, byte[] payload, Runnable failure) {
@@ -146,7 +152,7 @@ public final class WatchActivity extends Activity {
         if (controls == null) return;
         WatchAlarmStore.ViewState state = WatchAlarmStore.read(this);
         displayedToken = state.revision;
-        String detail = feedback == null ? state.detail : feedback;
+        String detail = notice != null ? notice : feedback == null ? state.detail : feedback;
         if (!watchUnlocked()) detail = "Unlock your watch.";
         controls.render(attempt != null ? "Sending request" : state.label, state.action,
             interactive() && attempt == null && state.enabled, detail);
@@ -167,7 +173,7 @@ public final class WatchActivity extends Activity {
         handler.post(tick);
     }
     @Override public void onPause() {
-        resumed = false; listenerReady = false; ++generation; tileAction = tileToken = null;
+        resumed = false; listenerReady = false; ++generation; tileAction = tileToken = notice = null;
         handler.removeCallbacks(tick); preferences.unregisterOnSharedPreferenceChangeListener(changed);
         if (listener != null) client.removeListener(listener); listener = null;
         if (attempt != null) endAttempt(commandSent ? "Check ADT for the result." : "Request cancelled.", commandSent);

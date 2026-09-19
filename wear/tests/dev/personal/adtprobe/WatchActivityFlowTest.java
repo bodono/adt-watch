@@ -234,6 +234,33 @@ public final class WatchActivityFlowTest {
         assertEquals(1, commits());
     }
 
+    @Test public void preChallengeDeclineEndsTheAttemptAtOnceWithANoticeThatSurvivesTheRefresh() {
+        report(AlarmStateProtocol.State.DISARMED);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(AlarmAction.ARM_STAY,
+            selected.request, UUID.randomUUID().toString(), ArmExperimentProtocol.Outcome.REQUESTED));
+        assertNotNull("A REQUESTED result before any challenge is ignored", attempt());
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(AlarmAction.ARM_STAY,
+            selected.request, UUID.randomUUID().toString(), ArmExperimentProtocol.Outcome.REJECTED));
+        stopQueryTransport();
+        assertNull(attempt());
+        assertEquals(1, sent.size());
+        assertEquals(0, commits());
+        assertTrue(controls().alarmButton.getText().toString().contains("Phone declined. Lock the phone"));
+
+        advance(2_001);
+        report(AlarmStateProtocol.State.DISARMED);
+        render();
+        assertTrue("The refreshed state re-enables the button", controls().alarmButton.isEnabled());
+        assertTrue("The decline stays readable after the status refresh",
+            controls().alarmButton.getText().toString().contains("Phone declined"));
+        tap();
+        assertEquals("The next deliberate tap clears the notice and sends a fresh request", 2, sent.size());
+        assertFalse(controls().alarmButton.getText().toString().contains("Phone declined"));
+    }
+
     @Test public void freshPhoneDiagnosisReplacesAnEarlierConnectionError() {
         report(AlarmStateProtocol.State.ARMED_STAY);
         mount(new Intent(Intent.ACTION_MAIN), null, true);
