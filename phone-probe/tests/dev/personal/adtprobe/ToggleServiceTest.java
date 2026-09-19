@@ -156,8 +156,7 @@ public final class ToggleServiceTest {
 
     @Test public void unlockedPhoneOrBusySessionIsDeclinedBeforeAnyAdtRead() {
         int before = queryCalls;
-        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(false);
-        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(false);
+        locked(false);
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertEquals("No ADT read precedes a tap the phone cannot serve", before, queryCalls);
@@ -165,8 +164,7 @@ public final class ToggleServiceTest {
         assertEquals(NODE, declines.get(0).node);
         assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
         assertEquals(request, declines.get(0).refusal.request);
-        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(true);
-        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(true);
+        locked(true);
         assertNotNull(queue());
         int during = queryCalls;
         String other = UUID.randomUUID().toString();
@@ -174,6 +172,21 @@ public final class ToggleServiceTest {
         assertEquals("A tap during a queued session is declined without a read", during, queryCalls);
         assertEquals(2, declines.size());
         assertEquals(other, declines.get(1).refusal.request);
+    }
+
+    @Test public void aTapRefusedOnTheWorkerCannotBecomeAGrantOnceThePhoneLocks() {
+        int before = queryCalls;
+        queryResult = report(AlarmStateProtocol.State.ARMED_AWAY);
+        locked(false);
+        // The listener worker answers before the main thread runs; the phone locks in between.
+        WatchLinkService.receiveToggle(context, event(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision)));
+        locked(true);
+        idle();
+        noStart();
+        assertEquals("The skipped preflight cannot be replaced by the cached state", before, queryCalls);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.State.DISARMED, PhoneAlarmState.snapshot(context).state);
     }
 
     @Test public void tapWithoutApprovedWatchAccessIsDeclinedInsteadOfIgnored() {
@@ -404,16 +417,23 @@ public final class ToggleServiceTest {
         Decline(String node, AlarmStateProtocol.Declined refusal) { this.node = node; this.refusal = refusal; assertNotNull(refusal); }
     }
     private void receive(String source, String path, byte[] bytes) {
+        MessageEvent event = event(source, path, bytes);
+        if (AlarmStateProtocol.TOGGLE_PATH.equals(path)) WatchLinkService.receiveToggle(context, event);
+        else ArmExperimentService.receive(context, event);
+        idle();
+    }
+    private MessageEvent event(String source, String path, byte[] bytes) {
         ShadowSystemClock.advanceBy(Duration.ofMillis(1));
-        MessageEvent event = new MessageEvent() {
+        return new MessageEvent() {
             @Override public int getRequestId() { return 1; }
             @Override public String getPath() { return path; }
             @Override public byte[] getData() { return bytes; }
             @Override public String getSourceNodeId() { return source; }
         };
-        if (AlarmStateProtocol.TOGGLE_PATH.equals(path)) WatchLinkService.receiveToggle(context, event);
-        else ArmExperimentService.receive(context, event);
-        idle();
+    }
+    private void locked(boolean value) {
+        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(value);
+        Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(value);
     }
     private void noStart() { assertNull(pending()); assertNull(Shadows.shadowOf(context).getNextStartedService()); }
     private Object pending() { return ReflectionHelpers.getStaticField(ArmExperimentService.class, "pending"); }

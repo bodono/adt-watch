@@ -38,9 +38,15 @@ public final class WatchLinkService extends WearableListenerService {
                 return;
             }
             if (!permission.nodeId.equals(event.getSourceNodeId())) return;
-            // An unlocked phone, a session still closing or open widget setup is declined without
-            // spending an ADT read first; the preflight read only precedes a request that can start.
-            if (!ArmExperimentService.cannotStartReadiness(context)) PhoneAlarmState.refresh(context);
+            // An unlocked phone, a session still closing or open widget setup is declined here on
+            // the worker, without an ADT read. Forwarding such a tap instead would let the main
+            // thread create readiness from the cached state if the phone locked in the meantime.
+            if (ArmExperimentService.cannotStartReadiness(context)) {
+                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
+                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                return;
+            }
+            PhoneAlarmState.refresh(context);
             // receive rechecks setup after the network read and again immediately before activation.
             ArmExperimentService.receive(context, event);
         } catch (RuntimeException ignored) { /* No native grant exists if preflight cannot finish. */ }
