@@ -8,7 +8,10 @@ public final class AlarmStateProtocol {
     public static final String STATE_PATH = "/adt-probe/v3/state/report";
     public static final String TOGGLE_PATH = "/adt-probe/v3/toggle/prepare";
     public static final long MAX_STATE_AGE_MS = 24 * 60 * 60 * 1000L;
-    public static final long LINK_FRESH_MS = 60_000;
+    // How recently the phone must have answered for the watch to offer a coloured control.
+    // The phone re-validates the displayed revision before acting, so this is a usability
+    // bound rather than the safety check; Wear OS does not guarantee the Tile's 60s refresh.
+    public static final long LINK_FRESH_MS = 3 * 60_000L;
     public enum State { UNKNOWN, DISARMED, ARMED_STAY, ARMED_AWAY }
     public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, SETUP, OFFLINE }
     private AlarmStateProtocol() { }

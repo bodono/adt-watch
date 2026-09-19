@@ -66,8 +66,11 @@ immediate checking frame was removed: physical traces showed a prompt READY
 reply followed by a substantially delayed second renderer request. Progress
 redraws are suppressed during recovery. Each waiter belongs to its initial
 recovery and cannot be extended by a replacement refresh. Failed passive recovery has a persisted
-60-second cooldown to prevent redraw loops. Visible app status refreshes near
-45 seconds, before its 60-second link freshness expires. Trusted update hints
+60-second cooldown to prevent redraw loops. Visible app status refreshes about
+every 45 seconds. A coloured control also needs a phone answer within the last
+three minutes; this is a usability bound rather than the safety check, because
+the phone re-validates the displayed state revision before acting, and Wear OS
+does not guarantee the Tile's own 60-second refresh. Trusted update hints
 can advance a queued status query, rate-limited to one query per 250ms, while
 ordinary failures keep the two-second retry interval and 30-second deadline.
 

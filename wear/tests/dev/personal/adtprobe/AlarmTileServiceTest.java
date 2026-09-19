@@ -120,12 +120,15 @@ public final class AlarmTileServiceTest {
 
     @Test public void oldCachedStatusIsFetchedWithoutARefreshTap() throws Exception {
         request(); idle(); reply(0, 0); advance(100);
-        advance(61_000);
+        advance(AlarmStateProtocol.LINK_FRESH_MS - 1_000);
+        assertTrue("A tile rendered within the link window keeps its colour without a re-query",
+                WatchAlarmStore.read(service).enabled);
+        advance(2_000);
         assertFalse(WatchAlarmStore.read(service).enabled);
         ListenableFuture<TileBuilders.Tile> result = request(); idle();
         assertFalse(result.isDone());
         assertEquals(2, transport.nonces.size());
-        reply(1, 61_100); advance(100);
+        reply(1, AlarmStateProtocol.LINK_FRESH_MS + 2_000); advance(100);
         assertTrue(tileText(result.get()).contains("Arm Stay"));
         assertEquals(60_000, result.get().getFreshnessIntervalMillis());
     }

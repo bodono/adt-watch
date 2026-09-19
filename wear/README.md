@@ -26,7 +26,8 @@ prompt phone replies followed by delayed renderer refreshes. Intermediate
 progress does not request extra redraws; completed recovery publishes one update.
 Passive starts have a 60-second cooldown after failure to prevent redraw loops;
 Refresh and entry events can still request a new bounded recovery period.
-While the app stays visible, it refreshes before the 60-second link cache expires.
+While the app stays visible, it refreshes about every 45 seconds; a coloured
+control needs a phone answer within the last three minutes.
 Trusted ADT state-change hints can advance a pending status retry, limited to
 one new query per 250ms; ordinary failure retries remain two seconds apart.
 
