@@ -103,6 +103,14 @@ public final class AdtSessionRecoveryTest {
         assertSame(original, recover(original)); assertEquals(1, logins);
         assertFalse(app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("enabled", false));
     }
+    @Test public void submittedLoginWithVerificationRequiredCannotEnableRecovery() {
+        response = failure(AdtPortalClient.Status.VERIFY_LOGIN);
+        assertFalse(AdtSessionRecovery.test(app, deadline()).ready);
+        assertEquals(1, logins); assertEquals(1, reads);
+        assertFalse(app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("enabled", false));
+        assertTrue(app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("blocked", false));
+        allowNextAttempt(); recover(failure(AdtPortalClient.Status.LOGIN_REQUIRED)); assertEquals(1, logins);
+    }
     @Test public void rejectedPasswordPausesRatherThanRetryingAtEveryWatchRefresh() {
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
         loginStatus = AdtLoginClient.Status.REJECTED;

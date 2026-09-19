@@ -53,8 +53,9 @@ verified Alarm.com login form and sends credentials once to the fixed HTTPS
 `www.alarm.com/web/Default.aspx` endpoint. It never follows a credential POST
 redirect. Each attempt uses an isolated temporary cookie jar, seeded only with
 the same-app trusted-device cookie. A successful read of the selected home
-commits the new cookies; failed tests preserve the old session and cannot pass
-using its existing authentication. MFA challenges must be
+commits the new cookies; failed tests leave the existing cookie jar unchanged
+and cannot pass using its existing authentication. ADT may independently
+invalidate older server sessions during a new login. MFA challenges must be
 completed in the official website. Requests, responses and errors have only
 closed diagnostics. No password, cookie or account body is logged. Starting a
 new login invalidates older native sessions' cookie writes, and interactive

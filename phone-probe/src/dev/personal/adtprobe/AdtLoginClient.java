@@ -101,7 +101,10 @@ final class AdtLoginClient {
         this.session = session; this.transport = transport; this.clock = clock;
     }
 
-    /** The caller owns its password array. SUBMITTED must be followed by a fresh, scoped status GET. */
+    /**
+     * The caller owns its password array. Use an isolated AdtLoginSession: SUBMITTED only means
+     * the fixed password POST returned, and requires a fresh scoped status GET in that same jar.
+     */
     Result login(String username, char[] password, long requestedDeadline) {
         long started = clock.elapsed();
         long deadline = Math.min(requestedDeadline, started > Long.MAX_VALUE - MAX_LOGIN_MS ? Long.MAX_VALUE : started + MAX_LOGIN_MS);
@@ -131,12 +134,10 @@ final class AdtLoginClient {
             Response answer = request("POST", POST_PATH, encoded, deadline); http = answer.code;
             requireHttp(answer.code);
             if (redirect(answer.code)) {
-                String destination = target(POST_PATH, answer.location, true);
-                if ("/web/system/home".equals(destination) || "/web/system/home/".equals(destination))
-                    return result(Status.SUBMITTED, started, stage, Reason.NONE, http);
-                if (loginPath(destination)) throw new Failure(Status.REJECTED, Reason.HTTP);
-                // A redirect to any other flow requires the owner to finish it in the official page.
-                throw new Failure(Status.VERIFY_LOGIN, Reason.REDIRECT);
+                // Website destinations vary and may represent home, rejected credentials or MFA.
+                // Never inspect, follow or forward credentials to Location. Only the coordinator's
+                // authenticated matching-home GET in this isolated jar can establish success.
+                return result(Status.SUBMITTED, started, stage, Reason.NONE, http);
             }
             if (answer.code != 200) throw new Failure(Status.UNAVAILABLE, Reason.HTTP);
             String document = html(answer);
@@ -322,18 +323,11 @@ final class AdtLoginClient {
     private static boolean redirect(int code) { return code == 301 || code == 302 || code == 303 || code == 307 || code == 308; }
     private static boolean loginPath(String path) { return LOGIN_PATH.equals(path) || "/login.aspx".equals(path) || POST_PATH.equals(path); }
     private static String target(String basePath, String location) throws Failure {
-        return target(basePath, location, false);
-    }
-    private static String target(String basePath, String location, boolean allowHomeQuery) throws Failure {
         if (!header(location, 2048) || location.isEmpty()) throw new Failure(Status.UNSUPPORTED, Reason.REDIRECT);
         try {
             URI uri = URI.create(ORIGIN + basePath).resolve(location);
-            // The POST Location is never followed. Ignore a home-page query only after validating
-            // its exact origin/path; the coordinator still needs an authenticated, scoped API GET.
-            boolean homeQuery = allowHomeQuery && ("/web/system/home".equals(uri.getRawPath())
-                || "/web/system/home/".equals(uri.getRawPath()));
             if (!"https".equals(uri.getScheme()) || !"www.alarm.com".equals(uri.getHost()) || uri.getPort() != -1
-                    || uri.getRawUserInfo() != null || uri.getRawFragment() != null || uri.getRawQuery() != null && !homeQuery
+                    || uri.getRawUserInfo() != null || uri.getRawFragment() != null || uri.getRawQuery() != null
                     || !uri.getRawPath().equals(uri.getPath())) throw new Failure(Status.UNSUPPORTED, Reason.REDIRECT);
             return uri.getPath();
         } catch (IllegalArgumentException ignored) { throw new Failure(Status.UNSUPPORTED, Reason.REDIRECT); }

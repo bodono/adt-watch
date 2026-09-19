@@ -94,22 +94,18 @@ public final class AdtLoginClientTest {
             assertEquals(2, transport.requests.size()); assertEquals(1, posts());
         }
     }
-    @Test public void onlyPostHomeRedirectMayContainAnIgnoredQueryWithoutFollowingIt() {
-        for (String home : Arrays.asList("/web/system/home?login=complete", ORIGIN + "/web/system/home/?inert=a%2Bb")) {
-            setup(); transport.responses.add(html(form(), null)); transport.responses.add(redirect(302, home, null));
+    @Test public void postRedirectLocationIsIgnoredRegardlessOfDestinationAndIsNeverAuthenticationProof() {
+        for (String destination : Arrays.asList("/web/system/home?login=complete", ORIGIN + "/web/system/home/?inert=a%2Bb",
+                "/web/system/home?login=complete#fragment", "https://inert@www.alarm.com/web/system/home?login=complete",
+                "https://evil.test/collect", "/login?return=/web/system/home", "/web/verification", "not a valid URL", null)) {
+            setup(); transport.responses.add(html(form(), null)); transport.responses.add(redirect(302, destination, null));
             AdtLoginClient.Result result = login();
             assertEquals(AdtLoginClient.Status.SUBMITTED, result.status);
             assertEquals("SUBMIT/NONE/302", result.diagnosticCode()); assertEquals(2, transport.requests.size()); assertEquals(1, posts());
             assertFalse(result.toString().contains("inert="));
-            setup(); transport.responses.add(redirect(302, home, null));
+            assertEquals(ORIGIN + "/web/Default.aspx", transport.requests.get(1).url);
+            setup(); transport.responses.add(redirect(302, destination, null));
             assertEquals(AdtLoginClient.Status.UNSUPPORTED, login().status); assertEquals(0, posts());
-        }
-        for (String rejected : Arrays.asList("/web/system/home?login=complete#fragment",
-                "https://inert@www.alarm.com/web/system/home?login=complete",
-                "https://evil.test/web/system/home?login=complete", "/login?return=/web/system/home")) {
-            setup(); transport.responses.add(html(form(), null)); transport.responses.add(redirect(302, rejected, null));
-            assertEquals(AdtLoginClient.Status.UNSUPPORTED, login().status); assertEquals(1, posts());
-            assertEquals(2, transport.requests.size());
         }
     }
     @Test public void foreignOrMalformedLocationsAndFormActionsCannotReceivePassword() {
@@ -120,7 +116,7 @@ public final class AdtLoginClientTest {
             setup(); transport.responses.add(html(form().replace("./login", location), null));
             assertEquals(AdtLoginClient.Status.UNSUPPORTED, login().status); assertEquals(0, posts());
             setup(); transport.responses.add(html(form(), null)); transport.responses.add(redirect(302, location, null));
-            assertEquals(AdtLoginClient.Status.UNSUPPORTED, login().status); assertEquals(1, posts());
+            assertEquals(AdtLoginClient.Status.SUBMITTED, login().status); assertEquals(1, posts());
             assertEquals(2, transport.requests.size());
         }
     }
@@ -131,7 +127,7 @@ public final class AdtLoginClientTest {
         transport.responses.add(html("<input autocomplete='one-time-code' name='code'>", null));
         assertEquals(AdtLoginClient.Status.VERIFY_LOGIN, login().status); assertEquals(1, posts());
         setup(); transport.responses.add(html(form(), null)); transport.responses.add(redirect(302, "/web/verification", null));
-        assertEquals("SUBMIT/REDIRECT/302", login().diagnosticCode()); assertEquals(1, posts());
+        assertEquals("SUBMIT/NONE/302", login().diagnosticCode()); assertEquals(1, posts());
     }
     @Test public void scriptsAndCommentsDoNotCreateFieldsOrFalseCaptchaChallenge() {
         transport.responses.add(html("<script>var key='g-recaptcha-response'; var x=\"<input name='txtPassword'>\";</script>"
@@ -167,7 +163,8 @@ public final class AdtLoginClientTest {
         setup(); transport.responses.add(html(form(), null)); transport.responses.add(html(form(), null));
         assertEquals(AdtLoginClient.Status.REJECTED, login().status); assertEquals(1, posts());
         setup(); transport.responses.add(html(form(), null)); transport.responses.add(redirect(302, "/login", null));
-        assertEquals(AdtLoginClient.Status.REJECTED, login().status); assertEquals(1, posts());
+        assertEquals("The coordinator must reject an unauthenticated scoped GET", AdtLoginClient.Status.SUBMITTED, login().status);
+        assertEquals(1, posts());
     }
     @Test public void arbitrary200PostHtmlCannotValidateNewCredentialsUsingAnExistingSession() {
         session.cookies = "twoFactorAuthenticationId=inert-trust; afg=old-valid-session";
