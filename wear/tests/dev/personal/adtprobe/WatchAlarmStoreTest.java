@@ -293,6 +293,22 @@ public final class WatchAlarmStoreTest {
         assertEquals(AlarmAction.DISARM, WatchAlarmStore.read(context).action);
     }
 
+    @Test public void unconfirmedWindowRunsFromTheCommitNotTheTap() {
+        WatchAlarmStore.ViewState view = seed(100);
+        WatchAlarmStore.Selection selected = WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY);
+        assertTrue(WatchAlarmStore.attachRequest(context, selected, R3));
+        advance(10_000); // A slow phone preflight before the challenge arrived.
+        assertTrue(WatchAlarmStore.markCommitting(context, selected, R3));
+        WatchAlarmStore.finish(context, true);
+        advance(25_000);
+        assertEquals("35 s after the tap but 25 s after the commit, the result is still being checked",
+                "Checking alarm", WatchAlarmStore.read(context).label);
+        advance(5_000);
+        assertEquals("Result unconfirmed", WatchAlarmStore.read(context).label);
+        assertEquals("Check ADT on your phone", WatchAlarmStore.read(context).detail);
+        assertFalse(WatchAlarmStore.read(context).enabled);
+    }
+
     @Test public void oldInstallPendingWithoutStartTimeIsImmediatelyUnconfirmed() {
         seed(100);
         context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE).edit()

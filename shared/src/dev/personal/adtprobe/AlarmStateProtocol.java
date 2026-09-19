@@ -13,7 +13,7 @@ public final class AlarmStateProtocol {
     public static final long PHONE_CHECK_FRESH_MS = 5 * 60_000;
     public static final long QUERY_FRESH_MS = 60_000;
     public enum State { UNKNOWN, DISARMED, ARMED_STAY, ARMED_AWAY }
-    public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, UNCONFIRMED, SETUP, OFFLINE }
+    public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, SETUP, OFFLINE }
     public enum DeclineReason { STATE_CHANGED, UNAVAILABLE, ALREADY_SATISFIED }
     public enum Evidence { ADT_NOTIFICATION, PHONE_CHECK, ADT_QUERY }
     private AlarmStateProtocol() { }
