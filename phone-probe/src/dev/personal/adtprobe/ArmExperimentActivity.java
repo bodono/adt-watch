@@ -75,14 +75,15 @@ public final class ArmExperimentActivity extends Activity {
         status.setTextSize(17); status.setPadding(0, dp(16), 0, dp(16)); column.addView(status);
         text(column, "Try one watch request", 21);
         text(column, "Prepare only when you intend to " + (action == AlarmAction.DISARM ? "disarm" : "arm")
-            + " the house. Then lock this phone and choose " + action.label() + " on the watch. "
-            + "You must confirm on the watch before anything is sent. Preparation expires after two minutes.", 16);
+            + " the house. Then lock this phone and tap the watch's alarm button while it offers " + action.label()
+            + "; that single tap is the confirmation. The watch needs current ADT status, so watch controls must be "
+            + "enabled for it to receive status. Preparation expires after two minutes.", 16);
         prepare = button(column, "Prepare one " + action.label() + " test…", () -> {
             if (!resumed || !unlocked() || ArmExperimentService.isRunning()) return;
             confirmation = new AlertDialog.Builder(this).setTitle("Prepare one " + action.label() + " test?")
                 .setMessage("Confirm that " + action.widgetLabel() + " contains only the intended SYSTEM / "
                     + (action == AlarmAction.DISARM ? "DISARM" : "ARM STAY") + " action. "
-                    + "A confirmation on your unlocked watch may then run that complete scene once while this phone is locked. "
+                    + "A single tap on your unlocked watch may then run that complete scene once while this phone is locked. "
                     + "Check ADT afterward to confirm the result. A request already sent to ADT cannot be recalled here.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Prepare test", (dialog, which) -> start(true)).create();
