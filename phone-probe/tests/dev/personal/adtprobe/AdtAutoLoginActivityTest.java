@@ -193,6 +193,20 @@ public final class AdtAutoLoginActivityTest {
         assertFalse(button("Test saved login").isEnabled());
     }
 
+    @Test public void transientKeyboardWindowFocusKeepsEntryEditableUntilActivityPauses() {
+        enter(); EditText field = input("ADT password"); field.requestFocus();
+        controller.windowFocusChanged(false); idle();
+        assertTrue(input("ADT username").isEnabled()); assertTrue(field.isEnabled());
+        assertTrue(field.hasFocus());
+        assertEquals("inert-user", input("ADT username").getText().toString());
+        assertEquals("fixture-password", field.getText().toString());
+        button("Save and test automatic login").performClick(); assertEquals(0, fake.saves);
+        controller.windowFocusChanged(true); idle();
+        assertTrue(field.isEnabled()); assertTrue(field.hasFocus());
+        controller.pause(); idle();
+        assertEquals("", field.getText().toString()); assertEquals("", input("ADT username").getText().toString());
+    }
+
     @Test public void workerExceptionNeverDisplaysItsDetails() {
         fake.throwOnTest = true; enter(); button("Save and test automatic login").performClick(); finishTest();
         assertTrue(screenText().contains("could not finish"));

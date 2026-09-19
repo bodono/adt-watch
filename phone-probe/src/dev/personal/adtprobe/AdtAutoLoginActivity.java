@@ -185,16 +185,21 @@ public final class AdtAutoLoginActivity extends Activity {
         catch (RuntimeException ignored) { return false; }
     }
     private boolean interactive() {
+        return resumed && !isFinishing() && !isDestroyed() && hasWindowFocus() && phoneUnlocked();
+    }
+    private boolean phoneUnlocked() {
         KeyguardManager lock = getSystemService(KeyguardManager.class);
-        return resumed && !isFinishing() && !isDestroyed() && hasWindowFocus() && lock != null
-            && !lock.isKeyguardLocked() && !lock.isDeviceLocked();
+        return lock != null && !lock.isKeyguardLocked() && !lock.isDeviceLocked();
     }
     private void updateButtons() {
         if (save == null) return;
         boolean active = interactive(), idle = inFlight == null, setup = bound();
         save.setEnabled(active && idle && setup); test.setEnabled(active && idle && setup && configured());
         forget.setEnabled(active); manual.setEnabled(active);
-        username.setEnabled(active && idle && setup); password.setEnabled(active && idle && setup);
+        // IME/other transient windows can change window focus while this Activity is still
+        // resumed. Disabling an EditText here removes its focus and immediately hides the IME.
+        boolean editable = resumed && !isFinishing() && !isDestroyed() && phoneUnlocked() && idle && setup;
+        username.setEnabled(editable); password.setEnabled(editable);
     }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private TextView text(LinearLayout column, String value, int size) {
@@ -223,7 +228,7 @@ public final class AdtAutoLoginActivity extends Activity {
         super.onWindowFocusChanged(focused);
         if (!focused) {
             if (inFlight != null) status.setText("Test cancelled. Tap Test saved login again.");
-            cancelTest(); clearInputs();
+            cancelTest();
         }
         updateButtons();
     }
