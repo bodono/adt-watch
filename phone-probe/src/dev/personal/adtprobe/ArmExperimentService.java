@@ -28,6 +28,7 @@ import java.lang.ref.WeakReference;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 
 /** Bounded widget requests. Only configuration persists; every activation needs a fresh watch confirmation. */
 public final class ArmExperimentService extends Service {
@@ -47,6 +48,11 @@ public final class ArmExperimentService extends Service {
     interface Responder { void send(Context context, String node, String path, byte[] payload); }
     private static volatile Responder responder = (context, node, path, payload) ->
         Wearable.getMessageClient(context).sendMessage(node, path, payload);
+    /** Connected-node discovery seam; inert tests replace it. It never selects a node by itself. */
+    interface NodeSource { void connectedNodes(Context context, Executor executor, Consumer<List<Node>> result); }
+    private static volatile NodeSource nodeSource = (context, executor, result) ->
+        Wearable.getNodeClient(context).getConnectedNodes().addOnCompleteListener(executor,
+            task -> result.accept(task.isSuccessful() ? task.getResult() : null));
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Executor mainExecutor = command -> handler.post(() -> runCallback(command));
@@ -198,8 +204,10 @@ public final class ArmExperimentService extends Service {
         MAIN.post(() -> {
             ArmExperimentService current = active;
             if (current != null && !current.stopped && !current.finishing) {
-                // A new toggle may never adopt an unrelated already-prepared session.
                 if (toggleRevision != null) {
+                    // A phone-prepared diagnostic session takes the watch's single tap as its
+                    // confirmation; a routine session never adopts a second, unrelated toggle.
+                    if (current.adoptWatchTap(source, message, toggleRevision)) return;
                     declineApproved(app, source, message, AlarmStateProtocol.DeclineReason.UNAVAILABLE);
                     return;
                 }
@@ -353,9 +361,8 @@ public final class ArmExperimentService extends Service {
 
     private void discoverNode() {
         try {
-            Wearable.getNodeClient(this).getConnectedNodes().addOnCompleteListener(mainExecutor, task -> {
+            nodeSource.connectedNodes(this, mainExecutor, nodes -> {
                 if (!live()) return;
-                List<Node> nodes = task.isSuccessful() ? task.getResult() : null;
                 if (nodes == null || nodes.size() != 1 || !validNode(nodes.get(0).getId())) {
                     stopNow("Experiment rejected: exactly one connected watch is required.");
                     return;
@@ -469,6 +476,27 @@ public final class ArmExperimentService extends Service {
         }
     }
 
+    /**
+     * The "Prepare one test" diagnostic was unreachable: the current watch only sends a state-bound
+     * toggle, which this service declined while the prepared session was active. Adopting the tap
+     * binds the session to the watch's displayed state revision, so the same state gate and durable
+     * pending bookkeeping apply as for a routine request.
+     */
+    private boolean adoptWatchTap(String source, ArmExperimentProtocol.Message message, String revision) {
+        if (!live() || !authorised || grant == null || grant.routine != null || grant.toggleRevision != null
+                || message.action != action || readinessWait.hasRequest() || challengeIssued || commitInFlight
+                || boundNode != null && !boundNode.equals(source)) return false;
+        if (!PhoneAlarmState.matches(this, revision, action)) {
+            sendDeclined(this, source, message, AlarmStateProtocol.DeclineReason.STATE_CHANGED);
+            PhoneStateLink.publish(this);
+            return true;
+        }
+        grant.adoptToggleRevision(revision);
+        Probe.event(this, "Prepared experiment adopted one state-bound watch tap.");
+        handle(source, message);
+        return true;
+    }
+
     private void advancePrepare() {
         if (!readinessWait.hasRequest()) return;
         if (!live() || !authorised) { readinessWait.clear(); return; }
@@ -496,9 +524,8 @@ public final class ArmExperimentService extends Service {
 
     private void checkCurrentNode(String source, Runnable continuation) {
         try {
-            Wearable.getNodeClient(this).getConnectedNodes().addOnCompleteListener(mainExecutor, task -> {
+            nodeSource.connectedNodes(this, mainExecutor, nodes -> {
                 if (!live()) return;
-                List<Node> nodes = task.isSuccessful() ? task.getResult() : null;
                 if (nodes == null || nodes.size() != 1 || !source.equals(nodes.get(0).getId())
                         || !source.equals(boundNode)) {
                     if (challengeIssued) rejectChallenge("Arm experiment rejected: connected watch changed.");
@@ -719,7 +746,7 @@ public final class ArmExperimentService extends Service {
         final AlarmAction action;
         final RoutineAccess.Snapshot routine;
         final String initialRequest;
-        final String toggleRevision;
+        volatile String toggleRevision;
         final long until = SystemClock.elapsedRealtime() + START_GRANT_MS;
         volatile boolean ownerVisible = true;
         private boolean closed;
@@ -742,6 +769,12 @@ public final class ArmExperimentService extends Service {
             authorised = true; action = prepare.action; this.routine = routine;
             initialRequest = prepare.requestId; ownerVisible = false;
             this.toggleRevision = toggleRevision;
+        }
+        /** Binds a phone-prepared session to the watch's displayed state revision, exactly once. */
+        void adoptToggleRevision(String revision) {
+            if (routine != null || toggleRevision != null || !AlarmStateProtocol.uuid(revision))
+                throw new IllegalStateException("Only an unbound prepared session can adopt a watch tap");
+            toggleRevision = revision;
         }
         void close() {
             if (!closed) { closed = true; application.unregisterActivityLifecycleCallbacks(this); owner.clear(); }
