@@ -22,6 +22,8 @@ import com.google.android.gms.wearable.MessageEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.time.Duration;
 import org.junit.After;
 import org.junit.Before;
@@ -129,24 +131,53 @@ public final class ToggleServiceTest {
         assertEquals(0, clicks);
     }
 
-    @Test public void tapInsideTheReuseWindowSkipsTheExtraRead() {
+    @Test public void aTapAlwaysGetsItsOwnReadInsteadOfTheReuseWindow() {
         int before = queryCalls;
-        Intent start = queue();
-        assertNotNull(start);
-        assertEquals("A read from moments ago is reused for the preflight", before, queryCalls);
+        // The state changed since the cached read one millisecond ago; passive callers would reuse it.
+        queryResult = report(AlarmStateProtocol.State.ARMED_STAY);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals("The preflight read ADT although a read was moments old", before + 1, queryCalls);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.ALREADY_SATISFIED, declines.get(0).refusal.reason);
+    }
+
+    @Test public void aPreflightThatCannotCompleteDeclinesTheTapAndLeavesTheDisplayAlone() throws Exception {
+        int before = queryCalls;
+        queryResult = report(AlarmStateProtocol.State.ARMED_STAY);
+        CountDownLatch holding = new CountDownLatch(1), release = new CountDownLatch(1);
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "queryOperation", (PhoneAlarmState.Query) (app, deadline) -> {
+            queryCalls++; holding.countDown();
+            try { release.await(); } catch (InterruptedException ignored) { }
+            return queryResult;
+        });
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1)); // Otherwise the fixture's read is shared as one begun after arrival.
+        Thread other = new Thread(() -> PhoneAlarmState.refresh(context, 0), "other ADT read");
+        other.start();
+        assertTrue(holding.await(5, TimeUnit.SECONDS));
+        // That worker holds the query lock for longer than the tap's whole read budget.
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals("The tap got no read of its own", before + 1, queryCalls);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(request, declines.get(0).refusal.request);
+        PhoneAlarmState.Snapshot display = PhoneAlarmState.snapshot(context);
+        assertEquals("The display keeps its earlier observation", AlarmStateProtocol.Availability.READY, display.availability);
+        assertEquals(AlarmStateProtocol.State.DISARMED, display.state);
+        release.countDown(); other.join(5_000);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
     }
 
     @Test public void staleTapRefreshesFromAdtAndAlreadySatisfiedActionsNeverStartAHost() {
         int before = queryCalls;
         queryResult = report(AlarmStateProtocol.State.ARMED_STAY);
-        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertEquals(before + 1, queryCalls);
         assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
         revision = PhoneAlarmState.snapshot(context).revision;
         queryResult = report(AlarmStateProtocol.State.DISARMED);
-        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.DISARM, revision));
         noStart();
         assertEquals(before + 2, queryCalls);
@@ -212,9 +243,10 @@ public final class ToggleServiceTest {
     @Test public void failedFreshReadCannotReusePreviouslyReadyStateToArm() {
         queryResult = new AdtPortalClient.Result(AdtPortalClient.Status.UNAVAILABLE,
             AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 10);
-        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
         assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
         assertEquals(0, clicks);
     }
@@ -224,7 +256,6 @@ public final class ToggleServiceTest {
             RoutineAccess.disable(context);
             return report(AlarmStateProtocol.State.DISARMED);
         });
-        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertEquals(0, clicks);
@@ -456,7 +487,6 @@ public final class ToggleServiceTest {
         queryResult = report(state);
         PhoneAlarmState.refresh(context, 0);
     }
-    private void pastReuse() { ShadowSystemClock.advanceBy(Duration.ofMillis(PhoneAlarmState.REUSE_MS)); }
     private AdtPortalClient.Result report(AlarmStateProtocol.State state) {
         return new AdtPortalClient.Result(AdtPortalClient.Status.READY, state,
             "inert-system", "inert-partition", "Inert Home", "Inert System", 10);

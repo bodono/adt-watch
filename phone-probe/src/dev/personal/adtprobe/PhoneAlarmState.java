@@ -45,7 +45,14 @@ final class PhoneAlarmState {
         final AlarmStateProtocol.Availability availability;
         final AlarmStateProtocol.Evidence evidence = AlarmStateProtocol.Evidence.ADT_QUERY;
         final boolean pending;
-        Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure) {
+        /**
+         * Only refresh sets this: true when that call completed, or shared, a successful read that
+         * satisfies it; false for a passive snapshot, a lock wait that timed out or a read that
+         * failed. A command's preflight requires it; the display does not.
+         */
+        final boolean verified;
+        Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure, boolean verified) {
+            this.verified = verified;
             state = value != null && failure == null ? value.state : AlarmStateProtocol.State.UNKNOWN;
             revision = value == null ? "-" : value.revision;
             observationId = value == null ? "-" : value.observationId;
@@ -56,9 +63,11 @@ final class PhoneAlarmState {
         }
     }
 
-    static synchronized Snapshot snapshot(Context context) {
+    static synchronized Snapshot snapshot(Context context) { return snapshot(context, false); }
+
+    private static synchronized Snapshot snapshot(Context context, boolean verified) {
         AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
-        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP);
+        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP, false);
         SharedPreferences stored = preferences(context);
         AdtLiveLedger.Snapshot value = read(stored, binding).snapshot(SystemClock.elapsedRealtime(), boot(context));
         AlarmStateProtocol.Availability failure = null;
@@ -70,7 +79,7 @@ final class PhoneAlarmState {
             else if ("AMBIGUOUS".equals(status) || "UNSUPPORTED".equals(status)) failure = AlarmStateProtocol.Availability.NO_STATE;
             else if (!"READY".equals(status) && !"BUSY".equals(status)) failure = AlarmStateProtocol.Availability.OFFLINE;
         }
-        return new Snapshot(value, failure);
+        return new Snapshot(value, failure, verified);
     }
 
     /** Worker-only read that reuses a successful read younger than REUSE_MS. */
@@ -83,7 +92,9 @@ final class PhoneAlarmState {
      * Worker-only read. A read that began after this call arrived is always shared. A successful
      * read younger than reuseMillis that also began after notBeforeElapsed is reused, so the
      * watch's retries, the confirmation poll and a tap's preflight do not each cost ADT a query.
-     * A failed read is never reused: the next caller tries again.
+     * A failed read is never reused: the next caller tries again. The returned snapshot says
+     * whether this call got its read (verified); a caller that only waited out another read in
+     * progress, or whose own read failed, is answered from the ledger with verified false.
      */
     static Snapshot refresh(Context context, long reuseMillis, long notBeforeElapsed) {
         Context app = context.getApplicationContext();
@@ -94,7 +105,8 @@ final class PhoneAlarmState {
         try {
             locked = QUERY_LOCK.tryLock(QUERY_MS, TimeUnit.MILLISECONDS);
             // Another caller's read held the lock the whole time. That says nothing about ADT, so
-            // do not record a failure that would turn a fresh observation OFFLINE for everyone.
+            // do not record a failure that would turn a fresh observation OFFLINE for everyone;
+            // this call simply did not get its read, which its unverified snapshot reports.
             if (!locked) return snapshot(app);
             synchronized (PhoneAlarmState.class) {
                 SharedPreferences stored = preferences(app);
@@ -102,7 +114,7 @@ final class PhoneAlarmState {
                 if (binding.id.equals(stored.getString("bindingId", "")) && stored.getInt("lastQueryBoot", -1) == boot(app)
                         && lastReadSucceeded(stored) && (lastStarted >= arrived
                             || lastStarted > notBeforeElapsed && now >= lastStarted && now - lastStarted < reuseMillis))
-                    return snapshot(app);
+                    return snapshot(app, true);
             }
             long started = SystemClock.elapsedRealtime();
             int queryBoot = boot(app);
@@ -121,8 +133,7 @@ final class PhoneAlarmState {
                         started, received, queryBoot, Boolean.TRUE.equals(result.loading)))) {
                     failed(app, binding, AdtPortalClient.Status.UNSUPPORTED); return snapshot(app);
                 }
-                write(app, binding, ledger, result.status, started, queryBoot);
-                return snapshot(app);
+                return snapshot(app, write(app, binding, ledger, result.status, started, queryBoot));
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt(); failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);

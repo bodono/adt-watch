@@ -46,7 +46,18 @@ public final class WatchLinkService extends WearableListenerService {
                     AlarmStateProtocol.DeclineReason.UNAVAILABLE);
                 return;
             }
-            PhoneAlarmState.refresh(context);
+            // A command's preflight is its own read, never the passive three-second reuse: a read
+            // from before the tap could hide a state change the already-satisfied and changed-state
+            // checks must see. Only a read that began after the tap arrived is shared. A tap whose
+            // read did not complete (lock wait over, read failed) is declined; the display keeps
+            // whatever observation it had.
+            PhoneAlarmState.Snapshot state = PhoneAlarmState.refresh(context, 0);
+            if (!state.verified) {
+                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
+                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                PhoneStateLink.publish(context);
+                return;
+            }
             // receive rechecks setup after the network read and again immediately before activation.
             ArmExperimentService.receive(context, event);
         } catch (RuntimeException ignored) { /* No native grant exists if preflight cannot finish. */ }

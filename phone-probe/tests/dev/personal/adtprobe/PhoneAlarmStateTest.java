@@ -126,6 +126,21 @@ public final class PhoneAlarmStateTest {
             AlarmStateProtocol.Availability.READY, PhoneAlarmState.refresh(context).availability);
         assertEquals(4, queries);
     }
+    @Test public void onlyACompletedOrSharedReadIsVerified() {
+        assertFalse("Without a binding nothing is read", PhoneAlarmState.refresh(context).verified);
+        bind();
+        assertTrue(read().verified);
+        assertFalse("A passive snapshot never claims a read", PhoneAlarmState.snapshot(context).verified);
+        advance(1_000);
+        assertTrue("A read shared inside the window counts", PhoneAlarmState.refresh(context).verified);
+        assertEquals(1, queries);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        assertFalse("A failed read does not", read().verified);
+        answer = result(AlarmStateProtocol.State.DISARMED);
+        PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; advance(8_001); return answer; };
+        assertFalse("Nor does one that outran its deadline", read().verified);
+        assertEquals(3, queries);
+    }
     @Test public void aConfirmationReadMustHaveStartedAfterTheCommand() {
         bind(); read();
         long requestStarted = SystemClock.elapsedRealtime();
