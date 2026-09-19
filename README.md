@@ -29,6 +29,9 @@ computer or USB cable.
 
 The phone helper also needs a **separate sign-in** through its embedded official
 ADT/Alarm.com page. Enter your password and any verification code in that page.
+The sign-in may pass through other ADT or Alarm.com hosts; the helper looks for
+the resulting session on both the ADT portal host and alarm.com, and the setup
+screen names the host it found after a successful check.
 The helper does not extract or store them; WebView retains the authenticated
 session cookies in its private browser storage. An expired session requires
 signing in again on the phone.
