@@ -1,6 +1,6 @@
 # ADT Watch — Wear OS module
 
-v0.24 uses fresh ADT website observations supplied by the phone. Red offers
+v0.25 uses fresh ADT website observations supplied by the phone. Red offers
 **Disarm** for Armed Stay/Away; green offers **Arm Stay** for Disarmed. Grey
 disables alarm actions when status is unknown, stale, unavailable or busy. An
 observation's age measures time since its query, not the alarm's last change.
@@ -38,7 +38,7 @@ The phone and watch APKs share application ID `dev.personal.adtprobe` and must
 use the same signer. Build both from the repository root with
 `./phone-probe/build.sh --check`. Native view tests use inert callbacks and
 generate local previews under `build/reports/watch-previews/` in this module.
-Earlier native-action checks do not establish v0.24 live-query reliability or
+Earlier native-action checks do not establish v0.25 live-query reliability or
 session longevity; physical and overnight verification remain necessary.
 
 See [BUILDING.md](../BUILDING.md), [installation and recovery](../docs/RECOVERY.md)
