@@ -103,6 +103,19 @@ public final class AdtPortalClientTest {
         assertEquals("Invalid identifiers or an expired deadline never reach the transport", requests + 1, transport.requests.size());
     }
 
+    @Test public void aSessionOnTheAdtPortalHostBuildsItsRequestsThereAndOtherOriginsAreRefused() throws Exception {
+        session.origin = "https://smartservices.adt.co.uk";
+        transport.responses.add(json(partition(1, 1)));
+        assertEquals(AdtPortalClient.Status.READY, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+        assertEquals("https://smartservices.adt.co.uk/web/api/devices/partitions/" + PARTITION, transport.requests.get(0).url);
+        assertEquals("https://smartservices.adt.co.uk/web/system/home", transport.requests.get(0).headers.get("Referer"));
+        session.origin = "https://evil.test";
+        assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+        session.origin = "http://www.alarm.com";
+        assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.query(clock.now + 5_000).status);
+        assertEquals("An origin outside the allow-list never reaches the transport", 1, transport.requests.size());
+    }
+
     @Test public void desiredStateIsNeverReportedAsActualAndLoadingIsExplicitlyUncertain() throws Exception {
         enqueue(1, 2);
         AdtPortalClient.Result result = client.query(5_000);
@@ -507,7 +520,8 @@ public final class AdtPortalClientTest {
         @Override public long elapsed() { return now; }
     }
     private static final class FakeSession implements AdtPortalClient.Session {
-        String cookie = "session=" + SECRET + "; afg=inert-afg", agent = "Inert-Agent/1";
+        String cookie = "session=" + SECRET + "; afg=inert-afg", agent = "Inert-Agent/1", origin = AdtPortalClient.ORIGIN;
+        @Override public String origin() { return origin; }
         final List<String> saved = new ArrayList<>();
         int persistCalls;
         @Override public void persist() { persistCalls++; }

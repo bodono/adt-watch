@@ -27,6 +27,7 @@ final class AdtPortalSession {
         @Override public synchronized String cookies() { requireActive(); return delegate.cookies(); }
         @Override public synchronized String cookies(String url) { requireActive(); return delegate.cookies(url); }
         @Override public synchronized String userAgent() { requireActive(); return delegate.userAgent(); }
+        @Override public synchronized String origin() { requireActive(); return delegate.origin(); }
         @Override public synchronized void storeCookie(String value) { requireActive(); delegate.storeCookie(value); }
         @Override public synchronized void storeCookie(String url, String value) { requireActive(); delegate.storeCookie(url, value); }
         @Override public synchronized void persist() { if (active) delegate.persist(); }
@@ -36,17 +37,19 @@ final class AdtPortalSession {
     static AdtPortalClient.Session session(Context context) {
         CookieManager manager = CookieManager.getInstance();
         String agent = WebSettings.getDefaultUserAgent(context.getApplicationContext());
+        String origin = sessionOrigin(manager);
         return new AdtPortalClient.Session() {
             private boolean changed;
-            @Override public String cookies() { return cookies(COOKIE_ORIGIN + "/web/api/identities"); }
+            @Override public String origin() { return origin; }
+            @Override public String cookies() { return cookies(origin + "/web/api/identities"); }
             @Override public String cookies(String requestUrl) {
-                requireApiUrl(requestUrl);
+                requireApiUrl(origin, requestUrl);
                 return manager.getCookie(requestUrl);
             }
             @Override public String userAgent() { return agent; }
-            @Override public void storeCookie(String value) { storeCookie(COOKIE_ORIGIN + "/web/api/identities", value); }
+            @Override public void storeCookie(String value) { storeCookie(origin + "/web/api/identities", value); }
             @Override public void storeCookie(String responseUrl, String value) {
-                requireApiUrl(responseUrl);
+                requireApiUrl(origin, responseUrl);
                 if (value != null && !value.isEmpty()) { manager.setCookie(responseUrl, value); changed = true; }
             }
             @Override public void persist() {
@@ -55,8 +58,27 @@ final class AdtPortalSession {
         };
     }
 
-    private static void requireApiUrl(String url) {
-        if (url == null || !url.startsWith(COOKIE_ORIGIN + "/web/api/"))
+    /**
+     * ADT UK signs in on its own branded host. Whether that session is then held on alarm.com or on
+     * the ADT host is not known until a real account is tried, so use whichever allowed origin holds
+     * the request-key cookie, preferring alarm.com.
+     */
+    static String sessionOrigin(CookieManager manager) {
+        for (String origin : AdtPortalClient.ORIGINS) if (hasRequestKey(manager.getCookie(origin))) return origin;
+        return COOKIE_ORIGIN;
+    }
+
+    static boolean hasRequestKey(String cookies) {
+        if (cookies == null) return false;
+        for (String cookie : cookies.split(";")) {
+            int equals = cookie.indexOf('=');
+            if (equals >= 0 && "afg".equals(cookie.substring(0, equals).trim())) return true;
+        }
+        return false;
+    }
+
+    private static void requireApiUrl(String origin, String url) {
+        if (url == null || !url.startsWith(origin + "/web/api/"))
             throw new IllegalArgumentException("Unexpected cookie scope");
     }
 
