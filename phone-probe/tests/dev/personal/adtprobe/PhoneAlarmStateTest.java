@@ -289,6 +289,24 @@ public final class PhoneAlarmStateTest {
         assertTrue(PhoneAlarmState.beginCommand(context, armed.revision, AlarmAction.DISARM, UUID.randomUUID().toString()));
         assertTrue("Going pending is a change", PhoneAlarmState.changed(armed, PhoneAlarmState.snapshot(context)));
     }
+    @Test public void aSignInProblemSaysWhatAutomaticLoginIsDoingAboutIt() {
+        bind(); answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED); read();
+        assertFalse(PhoneAlarmState.setupStatus(context).contains("Automatic login"));
+        String version = "11111111-1111-4111-8111-111111111111";
+        AdtSessionRecovery.Credentials old = AdtSessionRecovery.credentials;
+        AdtSessionRecovery.credentials = new AdtSessionRecovery.Credentials() {
+            @Override public String version(Context ignored) { return version; }
+            @Override public AdtCredentialStore.Credentials load(Context ignored) { return null; }
+        };
+        try {
+            context.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).edit().putString("version", version)
+                .putBoolean("enabled", true).putBoolean("blocked", true).putString("code", "SUBMIT/HTTP/401").commit();
+            assertTrue(PhoneAlarmState.setupStatus(context).contains("Automatic login is paused after SUBMIT/HTTP/401"));
+        } finally {
+            AdtSessionRecovery.credentials = old;
+            context.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).edit().clear().commit();
+        }
+    }
     @Test public void rebootAndOverdueCallbackRequireAnotherQuery() {
         bind(); read();
         Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 4);

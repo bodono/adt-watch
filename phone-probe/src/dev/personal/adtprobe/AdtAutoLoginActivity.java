@@ -33,6 +33,7 @@ public final class AdtAutoLoginActivity extends Activity {
         void clear(Context context);
         Result test(Context context, long deadline);
         void cancelTest();
+        String describe(Context context);
     }
     static final class Result {
         final boolean ready;
@@ -50,6 +51,7 @@ public final class AdtAutoLoginActivity extends Activity {
             return result == null ? null : new Result(result.ready, result.message);
         }
         @Override public void cancelTest() { AdtSessionRecovery.cancelTest(); }
+        @Override public String describe(Context context) { return AdtSessionRecovery.describe(context); }
     };
     static Executor testExecutor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "adt-login-test"); thread.setDaemon(true); return thread;
@@ -90,7 +92,7 @@ public final class AdtAutoLoginActivity extends Activity {
         forget = button(column, "Forget saved login", this::forgetLogin);
         manual = button(column, "Open ADT sign-in", this::openManual);
         status = text(column, !bound() ? "First open ADT sign-in and select your ADT system, then return here."
-            : configured() ? "A login is saved. Tap Test saved login to check it."
+            : configured() ? savedSummary()
             : "Enter your ADT username and password to enable automatic sign-in.", 15);
         updateButtons();
     }
@@ -180,6 +182,12 @@ public final class AdtAutoLoginActivity extends Activity {
         if (password != null) password.getText().clear();
     }
     private boolean bound() { return AdtPortalSession.binding(this) != null; }
+    /** Opening the screen says whether the saved login is verified, paused (and why) or waiting to retry. */
+    private String savedSummary() {
+        String note = null;
+        try { note = operations.describe(getApplicationContext()); } catch (RuntimeException ignored) { }
+        return (note == null ? "A login is saved." : note) + " Tap Test saved login to check it.";
+    }
     private boolean configured() {
         try { return operations.configured(getApplicationContext()); }
         catch (RuntimeException ignored) { return false; }

@@ -47,6 +47,10 @@ state. It never sends or replays an alarm action. An attempt is recorded before
 submission; transient failures have a five-minute retry delay, while rejected
 credentials, renewed verification and unsupported flows pause attempts until
 an explicit successful test. A cancelled or failed retest cannot enable recovery.
+The main screen's status line and the automatic-login screen say when attempts
+are paused or waiting, with the closed code. Signing in on the website and
+choosing the system again resumes paused attempts without re-verifying the
+saved credentials; a rejected password pauses them again after one attempt.
 
 `AdtLoginClient` is separate from the GET-only status client. It reads the
 verified Alarm.com login form and sends credentials once to the fixed HTTPS

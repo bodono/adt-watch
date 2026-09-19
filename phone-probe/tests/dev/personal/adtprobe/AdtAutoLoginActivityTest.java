@@ -113,6 +113,14 @@ public final class AdtAutoLoginActivityTest {
         assertEquals(0, fake.saves); assertEquals(1, fake.tests); assertTrue(fake.configured);
     }
 
+    @Test public void openingWithASavedLoginSaysWhatAutomaticLoginIsDoing() {
+        fake.configured = true; fake.summary = "Automatic login is paused after SUBMIT/HTTP/401.";
+        controller.recreate(); activity = controller.get(); controller.windowFocusChanged(true); idle();
+        assertTrue(screenText().contains("paused after SUBMIT/HTTP/401"));
+        assertTrue(screenText().contains("Tap Test saved login"));
+        assertEquals(0, fake.tests); assertTrue(work.isEmpty());
+    }
+
     @Test public void missingBindingRequiresSetupAndManualSignInDoesNotSelectOrSendAnything() {
         context.getSharedPreferences("adt_portal_binding", 0).edit().clear().commit();
         controller.recreate(); activity = controller.get(); controller.windowFocusChanged(true); idle();
@@ -250,6 +258,7 @@ public final class AdtAutoLoginActivityTest {
     }
     private static final class FakeOperations implements AdtAutoLoginActivity.Operations {
         boolean configured, saveSucceeds = true, cancelledBeforeClear, throwOnTest;
+        String summary;
         int saves, tests, clears, cancels;
         long deadline;
         char[] savedArray;
@@ -268,5 +277,6 @@ public final class AdtAutoLoginActivityTest {
             return answer;
         }
         @Override public void cancelTest() { cancels++; }
+        @Override public String describe(Context context) { return summary; }
     }
 }
