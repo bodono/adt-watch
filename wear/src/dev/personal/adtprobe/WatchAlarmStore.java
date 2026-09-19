@@ -400,7 +400,6 @@ final class WatchAlarmStore {
         // Synchronous persistence is intentional: process death must not resurrect this user's tap.
         boolean saved = p.edit().putBoolean("busy", true).putBoolean("awaiting", false)
                 .putString("actionSource", selected.phone).putString("actionRevision", selected.stateRevision)
-                .putString("actionState", p.getString("state", "UNKNOWN"))
                 .remove("token").remove("tokenIssued").commit();
         changed(context);
         if (!saved) activeSelection = null;
@@ -414,7 +413,7 @@ final class WatchAlarmStore {
         if (waiting && availability(p) == AlarmStateProtocol.Availability.READY
                 && trusted(p, boot(context)) && fresh(p, SystemClock.elapsedRealtime())
                 && age(p, SystemClock.elapsedRealtime()) <= AlarmStateProtocol.MAX_STATE_AGE_MS) {
-            waiting = !changedAfterAction(p, p.getString("source", ""), p.getString("revision", ""), state(p));
+            waiting = !changedAfterAction(p, p.getString("source", ""), p.getString("revision", ""));
         }
         p.edit().putBoolean("busy", waiting).putBoolean("awaiting", waiting)
                 .remove("token").remove("tokenIssued").apply();
@@ -432,13 +431,18 @@ final class WatchAlarmStore {
 
     private static boolean changedAfterAction(SharedPreferences p, String source, AlarmStateProtocol.Report report) {
         return report.availability == AlarmStateProtocol.Availability.READY
-                && changedAfterAction(p, source, report.revision, report.state);
+                && changedAfterAction(p, source, report.revision);
     }
 
-    private static boolean changedAfterAction(SharedPreferences p, String source, String revision, AlarmStateProtocol.State state) {
+    /**
+     * The phone consumes the displayed revision before executing and stays BUSY until a newer ADT
+     * event, so any READY report carrying another revision is a post-command report. The state
+     * itself may legitimately repeat (a rejected or redundant command that ADT re-reported), and
+     * requiring it to differ left the watch on "Checking alarm" with no way out.
+     */
+    private static boolean changedAfterAction(SharedPreferences p, String source, String revision) {
         return source.equals(p.getString("actionSource", ""))
-                && !revision.equals(p.getString("actionRevision", ""))
-                && !state.name().equals(p.getString("actionState", ""));
+                && !revision.equals(p.getString("actionRevision", ""));
     }
 
     private static synchronized void failQuery(Context context, Query query) {

@@ -121,7 +121,7 @@ public final class WatchAlarmStoreTest {
         assertNull(WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY));
     }
 
-    @Test public void possibleSendStaysUnknownForSameRevisionBusyOrSameStateRevisionChange() {
+    @Test public void possibleSendStaysUnknownForSameRevisionOrBusyAndClearsOnAnyNewerRevision() {
         WatchAlarmStore.ViewState view = seed(100);
         assertNotNull(WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY));
         WatchAlarmStore.finish(context, true);
@@ -132,7 +132,11 @@ public final class WatchAlarmStoreTest {
                 AlarmStateProtocol.State.UNKNOWN, AlarmStateProtocol.Availability.BUSY, "-", 0), now(), BOOT));
         assertFalse(WatchAlarmStore.read(context).enabled);
         assertTrue(update(R2, AlarmStateProtocol.State.DISARMED, 0));
-        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertEquals("A newer phone revision is a post-command report even when the state repeats",
+                AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        assertFalse(context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean("awaiting", false));
         advance(10);
         assertTrue(update(R3, AlarmStateProtocol.State.ARMED_STAY, 0));
         assertEquals(AlarmAction.DISARM, WatchAlarmStore.read(context).action);
