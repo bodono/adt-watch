@@ -107,6 +107,25 @@ public final class PhoneAlarmStateTest {
         assertFalse(current.pending); assertEquals("-", current.completedRequest);
         assertEquals("UNCONFIRMED", context.getSharedPreferences(PhoneAlarmState.PREFERENCES, 0).getString("outcome", ""));
     }
+    @Test public void membershipProofCoversOneBindingForSixHoursPerBoot() {
+        bind();
+        AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
+        assertFalse(PhoneAlarmState.membershipProven(context, binding));
+        PhoneAlarmState.recordMembership(context, binding);
+        assertTrue(PhoneAlarmState.membershipProven(context, binding));
+        advance(PhoneAlarmState.MEMBERSHIP_PROOF_MS - 1);
+        assertTrue(PhoneAlarmState.membershipProven(context, binding));
+        advance(1);
+        assertFalse("A proof lapses after six hours", PhoneAlarmState.membershipProven(context, binding));
+        PhoneAlarmState.recordMembership(context, binding);
+        Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 4);
+        assertFalse("A reboot needs a fresh proof", PhoneAlarmState.membershipProven(context, binding));
+        Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 3);
+        assertTrue(PhoneAlarmState.membershipProven(context, binding));
+        bind();
+        assertFalse("A new binding needs its own proof", PhoneAlarmState.membershipProven(context, AdtPortalSession.binding(context)));
+        assertFalse(PhoneAlarmState.membershipProven(context, null));
+    }
     @Test public void rebootAndOverdueCallbackRequireAnotherQuery() {
         bind(); read();
         Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 4);
