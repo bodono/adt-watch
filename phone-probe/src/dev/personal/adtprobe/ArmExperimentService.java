@@ -43,6 +43,10 @@ public final class ArmExperimentService extends Service {
     private static final RoutinePrepareReplayGuard RECENT_PREPARES = new RoutinePrepareReplayGuard();
     private static volatile ArmExperimentService active;
     private static volatile StartGrant pending;
+    /** Transport for a decline; inert tests replace it. A decline carries no authority. */
+    interface Responder { void send(Context context, String node, String path, byte[] payload); }
+    private static volatile Responder responder = (context, node, path, payload) ->
+        Wearable.getMessageClient(context).sendMessage(node, path, payload);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Executor mainExecutor = command -> handler.post(() -> runCallback(command));
@@ -268,10 +272,21 @@ public final class ArmExperimentService extends Service {
 
     private static void sendDeclined(Context app, String source, ArmExperimentProtocol.Message message,
             AlarmStateProtocol.DeclineReason reason) {
+        declineTap(app, source, message.action, message.requestId, reason);
+    }
+
+    /** Tells the watch at once that its tap cannot be served, instead of leaving it to its deadline. */
+    static void declineTap(Context app, String source, AlarmAction action, String request,
+            AlarmStateProtocol.DeclineReason reason) {
         try {
-            Wearable.getMessageClient(app).sendMessage(source, AlarmStateProtocol.DECLINED_PATH,
-                    new AlarmStateProtocol.Declined(message.action, message.requestId, reason).encode());
+            responder.send(app, source, AlarmStateProtocol.DECLINED_PATH,
+                    new AlarmStateProtocol.Declined(action, request, reason).encode());
         } catch (RuntimeException ignored) { /* The watch deadline still ends this unsent attempt. */ }
+    }
+
+    /** The cheap conditions under which a tap is declined anyway, so no ADT read need precede it. */
+    static boolean cannotStartReadiness(Context context) {
+        return isRunning() || !phoneLocked(context) || WidgetSetupActivity.hasListeningHost();
     }
 
     @Override public void onCreate() {
