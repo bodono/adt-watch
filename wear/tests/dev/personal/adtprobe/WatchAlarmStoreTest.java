@@ -1,6 +1,7 @@
 package dev.personal.adtprobe;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -192,7 +193,10 @@ public final class WatchAlarmStoreTest {
 
     @Test public void recoveredProcessTreatsUnfinishedTapAsPossiblySentAndCanRecoverFromChangedReport() {
         WatchAlarmStore.ViewState view = seed(100);
-        assertNotNull(WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY));
+        WatchAlarmStore.Selection selected = WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY);
+        assertNotNull(selected);
+        assertTrue(WatchAlarmStore.attachRequest(context, selected, R3));
+        assertTrue(WatchAlarmStore.markCommitting(context, selected, R3));
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "activeSelection", null);
         assertFalse(WatchAlarmStore.read(context).enabled);
         assertTrue(context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE)
@@ -201,6 +205,213 @@ public final class WatchAlarmStoreTest {
         assertFalse(WatchAlarmStore.read(context).enabled);
         assertTrue(update(R2, AlarmStateProtocol.State.ARMED_STAY, 0));
         assertEquals(AlarmAction.DISARM, WatchAlarmStore.read(context).action);
+    }
+
+    @Test public void preCommitProcessDeathDoesNotInventAnUncertainAlarmCommand() {
+        WatchAlarmStore.ViewState view = seed(100);
+        WatchAlarmStore.Selection selected = WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY);
+        assertTrue(WatchAlarmStore.attachRequest(context, selected, R3));
+        assertFalse(WatchAlarmStore.markCommitting(context, selected, R2));
+        ReflectionHelpers.setStaticField(WatchAlarmStore.class, "activeSelection", null);
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        assertFalse(context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean("awaiting", false));
+        assertNull(WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY));
+    }
+
+    @Test public void sameStateCanResolveOnlyTheMatchingCompletedRequest() {
+        WatchAlarmStore.ViewState view = seed(100);
+        WatchAlarmStore.Selection selected = WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY);
+        assertTrue(WatchAlarmStore.attachRequest(context, selected, R3));
+        assertTrue(WatchAlarmStore.markCommitting(context, selected, R3));
+        WatchAlarmStore.finish(context, true);
+        assertTrue(update(R2, AlarmStateProtocol.State.DISARMED, 0, R1));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertTrue(update(R3, AlarmStateProtocol.State.DISARMED, 0, R3));
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        assertEquals(AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
+    }
+
+    @Test public void unsolicitedCompletionDoesNotClearUncertainty() {
+        WatchAlarmStore.ViewState view = seed(100);
+        WatchAlarmStore.Selection selected = WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY);
+        assertTrue(WatchAlarmStore.attachRequest(context, selected, R3));
+        WatchAlarmStore.finish(context, true);
+        assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report("-",
+                AlarmStateProtocol.State.DISARMED, AlarmStateProtocol.Availability.READY, R2, 0, R3), now(), BOOT));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertTrue(context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean("awaiting", false));
+    }
+
+    @Test public void missingResultBecomesUnconfirmedWithoutInventingCompletionAndCanRecoverLater() {
+        WatchAlarmStore.ViewState view = seed(100);
+        assertNotNull(WatchAlarmStore.consume(context, view.revision, AlarmAction.ARM_STAY));
+        WatchAlarmStore.finish(context, true);
+        assertEquals("Checking alarm", WatchAlarmStore.read(context).label);
+        advance(30_000);
+        assertEquals("Result unconfirmed", WatchAlarmStore.read(context).label);
+        advance(3_600_000);
+        assertEquals("Result unconfirmed", WatchAlarmStore.read(context).label);
+        assertTrue(context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean("awaiting", false));
+        assertTrue(update(R2, AlarmStateProtocol.State.ARMED_STAY, 0));
+        assertEquals(AlarmAction.DISARM, WatchAlarmStore.read(context).action);
+    }
+
+    @Test public void oldInstallPendingWithoutStartTimeIsImmediatelyUnconfirmed() {
+        seed(100);
+        context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE).edit()
+                .putBoolean("busy", true).putBoolean("awaiting", false).remove("actionStarted")
+                .remove("commitMayHaveBeenSent").commit();
+        assertEquals("Result unconfirmed", WatchAlarmStore.read(context).label);
+        assertFalse(WatchAlarmStore.read(context).enabled);
+    }
+
+    @Test public void phoneCheckedStateIsLabelledSeparatelyAndExpiresWithinFiveMinutes() {
+        WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
+        assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
+        assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce,
+                AlarmStateProtocol.State.DISARMED, AlarmStateProtocol.Availability.READY, R1,
+                AlarmStateProtocol.PHONE_CHECK_FRESH_MS - 10, "-", AlarmStateProtocol.Evidence.PHONE_CHECK), now(), BOOT));
+        assertTrue(WatchAlarmStore.read(context).detail.startsWith("Checked "));
+        assertEquals(10, WatchAlarmStore.remainingActionValidityMillis(context));
+        advance(11);
+        assertFalse(WatchAlarmStore.read(context).enabled);
+    }
+
+    @Test public void explicitPhoneCheckCanSettleLegacyPendingWithoutInventingARequestId() {
+        seed(100);
+        context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE).edit()
+                .putBoolean("busy", true).putBoolean("awaiting", true)
+                .putString("actionSource", PHONE).putString("actionRevision", R1)
+                .putString("actionState", "DISARMED").remove("actionStarted").remove("actionRequest").commit();
+        advance(2_000);
+        WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
+        assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
+        assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce,
+                AlarmStateProtocol.State.DISARMED, AlarmStateProtocol.Availability.READY, R2, 0, "-",
+                AlarmStateProtocol.Evidence.PHONE_CHECK), now(), BOOT));
+        assertEquals(AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
+        assertEquals("", context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE)
+                .getString("actionRequest", ""));
+    }
+
+    @Test public void laterPhoneCheckSettlesAnUncertainCommitThatNeverReachedThePhone() {
+        committedAttempt();
+        WatchAlarmStore.finish(context, true);
+        stopRecovery();
+        advance(2_000);
+        WatchAlarmStore.Query query = selectedQuery();
+        advance(300);
+        // No completed request is reported: the phone never persisted this COMMIT.
+        assertTrue(WatchAlarmStore.accept(context, PHONE, checkedReport(query.nonce, 100), now(), BOOT));
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        assertEquals(AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
+        assertEquals(R3, stored().getString("checkedActionRequest", ""));
+        assertEquals("Explicit verification must not invent a phone completion UUID", "-",
+            stored().getString("completedRequest", ""));
+        assertFalse(stored().getBoolean("busy", false));
+
+        WatchAlarmStore.ViewState checked = WatchAlarmStore.read(context);
+        assertNotNull(WatchAlarmStore.consume(context, checked.revision, checked.action));
+        assertFalse("A new tap cannot reuse the previous verification proof", stored().contains("checkedActionRequest"));
+        assertFalse(stored().contains("commitStarted"));
+        assertFalse(stored().contains("commitBoot"));
+    }
+
+    @Test public void verificationBeforeTheResultCallbackCannotBeReblockedByFinish() {
+        committedAttempt();
+        advance(2_000);
+        WatchAlarmStore.Query query = selectedQuery();
+        advance(300);
+        assertTrue(WatchAlarmStore.accept(context, PHONE, checkedReport(query.nonce, 100), now(), BOOT));
+        assertTrue("The live attempt has not yet processed its result", stored().getBoolean("busy", false));
+        assertEquals(R3, stored().getString("checkedActionRequest", ""));
+        WatchAlarmStore.finish(context, true);
+        stopRecovery();
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        assertFalse(stored().getBoolean("awaiting", false));
+        assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
+    }
+
+    @Test public void phoneCheckAtTheCommitBoundaryIsNotProofOfItsOutcome() {
+        assertOldPhoneCheckCannotSettle(2_000);
+    }
+
+    @Test public void phoneCheckBeforeCommitCannotSettleEvenWhenItsReplyArrivesLater() {
+        assertOldPhoneCheckCannotSettle(2_001);
+    }
+
+    private void assertOldPhoneCheckCannotSettle(long age) {
+        committedAttempt();
+        WatchAlarmStore.finish(context, true);
+        stopRecovery();
+        advance(2_000);
+        WatchAlarmStore.Query query = selectedQuery();
+        advance(500);
+        // At age=2000, age alone looks newer than the 2500ms-old commit. Including
+        // the entire 500ms round trip makes equality too ambiguous to clear it.
+        assertTrue(WatchAlarmStore.accept(context, PHONE, checkedReport(query.nonce, age), now(), BOOT));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertTrue(stored().getBoolean("awaiting", false));
+        assertFalse(stored().contains("checkedActionRequest"));
+    }
+
+    @Test public void wrongSourceWrongQueryAndPushedPhoneChecksCannotSettleACommit() {
+        committedAttempt();
+        WatchAlarmStore.finish(context, true);
+        stopRecovery();
+        advance(2_000);
+        WatchAlarmStore.Query query = selectedQuery();
+        advance(300);
+        assertFalse(WatchAlarmStore.accept(context, "other-phone", checkedReport(query.nonce, 100), now(), BOOT));
+        assertFalse(WatchAlarmStore.accept(context, PHONE, checkedReport(R1, 100), now(), BOOT));
+        assertTrue(WatchAlarmStore.accept(context, PHONE, checkedReport("-", 100), now(), BOOT));
+        assertFalse("A push invalidates the pending query rather than confirming it",
+            WatchAlarmStore.accept(context, PHONE, checkedReport(query.nonce, 100), now(), BOOT));
+        assertFalse(stored().contains("checkedActionRequest"));
+        assertTrue(stored().getBoolean("awaiting", false));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+    }
+
+    @Test public void phoneCheckOnAnExpiredQueryCannotSettleACommit() {
+        committedAttempt();
+        WatchAlarmStore.finish(context, true);
+        stopRecovery();
+        advance(2_000);
+        WatchAlarmStore.Query query = selectedQuery();
+        advance(10_000);
+        assertFalse(WatchAlarmStore.accept(context, PHONE, checkedReport(query.nonce, 0), now(), BOOT));
+        assertFalse(stored().contains("checkedActionRequest"));
+        assertTrue(stored().getBoolean("awaiting", false));
+    }
+
+    private void committedAttempt() {
+        WatchAlarmStore.ViewState initial = seed(100);
+        WatchAlarmStore.Selection selected = WatchAlarmStore.consume(context, initial.revision, initial.action);
+        assertNotNull(selected);
+        assertTrue(WatchAlarmStore.attachRequest(context, selected, R3));
+        long committed = now();
+        assertTrue(WatchAlarmStore.markCommitting(context, selected, R3));
+        assertEquals(committed, stored().getLong("commitStarted", -1));
+        assertEquals(BOOT, stored().getInt("commitBoot", -1));
+    }
+
+    private WatchAlarmStore.Query selectedQuery() {
+        WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
+        assertNotNull(query);
+        assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
+        return query;
+    }
+
+    private static AlarmStateProtocol.Report checkedReport(String nonce, long age) {
+        return new AlarmStateProtocol.Report(nonce, AlarmStateProtocol.State.DISARMED,
+            AlarmStateProtocol.Availability.READY, R2, age, "-", AlarmStateProtocol.Evidence.PHONE_CHECK);
+    }
+
+    private SharedPreferences stored() {
+        return context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE);
     }
 
     private WatchAlarmStore.ViewState seed(long age) {
@@ -212,6 +423,9 @@ public final class WatchAlarmStoreTest {
         return WatchAlarmStore.read(context);
     }
     private boolean update(String revision, AlarmStateProtocol.State state, long age) {
+        return update(revision, state, age, "-");
+    }
+    private boolean update(String revision, AlarmStateProtocol.State state, long age, String completedRequest) {
         advance(2_000);
         WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
         if (query == null) {
@@ -220,7 +434,8 @@ public final class WatchAlarmStoreTest {
         }
         assertNotNull(query);
         assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
-        return WatchAlarmStore.accept(context, PHONE, report(query.nonce, revision, state, age), now(), BOOT);
+        return WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce, state,
+                AlarmStateProtocol.Availability.READY, revision, age, completedRequest), now(), BOOT);
     }
     private boolean push(String revision, AlarmStateProtocol.State state, long age) {
         return WatchAlarmStore.accept(context, PHONE, report("-", revision, state, age), now(), BOOT);

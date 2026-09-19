@@ -14,10 +14,12 @@ import android.os.Process;
 import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.RemoteViews;
+import android.widget.TextView;
 import com.google.android.gms.wearable.MessageEvent;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -57,6 +59,8 @@ public final class ToggleServiceTest {
     private TimeZone oldZone;
     private String request, revision, challenge;
     private int clicks;
+    private int validations, rejectValidation = -1;
+    private boolean falseAfterClick, throwAfterClick;
 
     @Before public void prepare() {
         context = RuntimeEnvironment.getApplication();
@@ -151,9 +155,48 @@ public final class ToggleServiceTest {
             notification("Armed Stay", System.currentTimeMillis() - 1_000));
         invokeCommit();
         assertEquals(0, clicks);
-        assertEquals(Boolean.FALSE, member(inertHost, "consumed"));
+        assertEquals("The one-shot is reserved before the state check, without entering the click",
+            Boolean.TRUE, member(inertHost, "consumed"));
         assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
         assertFalse(PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
+    }
+
+    @Test public void finalBindingRejectionDoesNotPersistAPhantomPendingCommand() {
+        create(queue()); installInertReadyHost(); setChallenge();
+        // The service's first readiness check passes; the host's final check fails.
+        rejectValidation = validations + 2;
+        invokeCommit();
+        assertEquals(rejectValidation, validations);
+        assertEquals(0, clicks);
+        assertEquals(Boolean.FALSE, member(inertHost, "consumed"));
+        assertEquals(0L, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE)
+            .getLong("pending_after_ms", 0));
+        assertTrue(PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
+        assertTrue(ArmExperimentService.status(context).contains("experiment rejected"));
+    }
+
+    @Test public void falseReturnAfterNativeClickRemainsRequestedAndCannotRepeat() {
+        create(queue()); installInertReadyHost(); setChallenge();
+        falseAfterClick = true;
+        invokeCommit();
+        assertAttemptedWithoutRetry();
+    }
+
+    @Test public void exceptionAfterNativeClickRemainsRequestedAndCannotRepeat() {
+        create(queue()); installInertReadyHost(); setChallenge();
+        throwAfterClick = true;
+        invokeCommit();
+        assertAttemptedWithoutRetry();
+    }
+
+    private void assertAttemptedWithoutRetry() {
+        assertEquals(1, clicks);
+        assertEquals(AlarmStateProtocol.Availability.BUSY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(Boolean.TRUE, member(inertHost, "consumed"));
+        assertTrue("An entered native click cannot become a definite rejection",
+            ArmExperimentService.status(context).contains("widget click attempted once"));
+        invokeCommit();
+        assertEquals(1, clicks);
     }
 
     private void installInertReadyHost() {
@@ -165,9 +208,10 @@ public final class ToggleServiceTest {
         inertHost = new WidgetHostSession(context, AlarmAction.ARM_STAY, new WidgetHostSession.Binding() {
             @Override public WidgetHostSession.Snapshot snapshot() { return new WidgetHostSession.Snapshot(7, 1, info, contract); }
             @Override public boolean valid(WidgetHostSession.Snapshot snapshot, AppWidgetHost host) {
+                validations++;
                 Runnable sideEffect = validationSideEffect; validationSideEffect = null;
                 if (sideEffect != null) sideEffect.run();
-                return true;
+                return validations != rejectValidation;
             }
         });
         inertHost.start();
@@ -175,7 +219,20 @@ public final class ToggleServiceTest {
         RemoteViews remote = new RemoteViews(context.getPackageName(), android.R.layout.simple_list_item_1);
         remote.setTextViewText(android.R.id.text1, AlarmAction.ARM_STAY.widgetLabel());
         view.updateAppWidget(remote);
-        view.findViewById(android.R.id.text1).setOnClickListener(ignored -> {
+        View originalTarget = view.findViewById(android.R.id.text1);
+        ViewGroup parent = (ViewGroup) originalTarget.getParent();
+        parent.removeView(originalTarget);
+        TextView target = new TextView(context) {
+            @Override public boolean performClick() {
+                boolean result = super.performClick();
+                if (throwAfterClick) throw new IllegalStateException("Inert post-click failure");
+                return !falseAfterClick && result;
+            }
+        };
+        target.setId(android.R.id.text1);
+        target.setText(AlarmAction.ARM_STAY.widgetLabel());
+        parent.addView(target);
+        target.setOnClickListener(ignored -> {
             assertEquals("The service permit must already be consumed", Boolean.FALSE, member(service, "authorised"));
             assertEquals("BUSY must be durably saved before entering a view listener", AlarmStateProtocol.Availability.BUSY,
                 PhoneAlarmState.snapshot(context).availability);

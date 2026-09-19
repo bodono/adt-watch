@@ -1,9 +1,11 @@
 # ADT Watch — Wear OS module
 
-v0.20 shows one large alarm button and an **ADT Watch** Tile. Red means ADT last
+v0.21 shows one large alarm button and an **ADT Watch** Tile. Red means ADT last
 reported Armed Stay/Away and offers **Disarm**; green means reported Disarmed and
 offers **Arm Stay**. Grey disables alarm actions when state is unknown, stale,
-unavailable or awaiting a new report. State age is shown.
+unavailable or awaiting a new report. The observation date/time is shown. v0.21
+expires cached coloured entries into a grey fallback and bounds progress to
+30 seconds before showing an unconfirmed result.
 
 A positive tap sends the displayed action with no second confirmation. A
 coloured Tile tap opens the app and continues that same request. The action is
@@ -14,7 +16,9 @@ not execute an alarm command.
 A watch PIN or pattern is optional. An existing system lock is respected, and
 the app must remain visible and focused while sending. There are no automatic
 alarm retries. **Refresh** reads phone status without operating the alarm; only
-a newer accepted ADT report can resolve a pending result. App/Tile entry and
+a newer accepted ADT report or explicit checked-state recovery on the phone can
+resolve a pending result. A phone check is labelled **Checked** and expires
+after five minutes. App/Tile entry and
 completed attempts start a read-only recovery period of up to 30 seconds,
 retrying failed or incomplete status checks without repeating the alarm action.
 Tile rendering also checks stale or missing status automatically, without

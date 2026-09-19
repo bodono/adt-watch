@@ -261,11 +261,129 @@ public final class WatchActivityFlowTest {
         assertEquals(0, commits());
     }
 
+    @Test public void matchedEarlyRefusalEndsTheTapWithoutCommitOrOppositeAction() {
+        for (AlarmAction action : AlarmAction.values()) {
+            closeActivity(); resetStore(); sent.clear();
+            WatchAlarmStore.ViewState original = report(action == AlarmAction.DISARM
+                    ? AlarmStateProtocol.State.ARMED_STAY : AlarmStateProtocol.State.DISARMED);
+            mount(new Intent(Intent.ACTION_MAIN), null, true);
+            tap();
+            AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+            handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
+                    action, selected.request, AlarmStateProtocol.DeclineReason.STATE_CHANGED).encode());
+            stopQueryTransport();
+            assertNull(attempt());
+            assertFalse(stored().getBoolean("busy", false));
+            assertFalse(stored().getBoolean("awaiting", false));
+            assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
+            assertEquals(1, sent.size());
+            assertEquals(0, commits());
+            assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+
+            // The phone's later state report may offer the opposite action, but
+            // the refused tap has no authority to perform it or accept a late challenge.
+            advance(2_001);
+            report(action == AlarmAction.DISARM ? AlarmStateProtocol.State.DISARMED : AlarmStateProtocol.State.ARMED_STAY);
+            render();
+            handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+                    ArmExperimentProtocol.encodeChallenge(action, selected.request, UUID.randomUUID().toString()));
+            assertEquals(1, sent.size());
+            assertNull(attempt());
+            assertNull(WatchAlarmStore.consume(context, original.revision, WatchAlarmStore.read(context).action));
+        }
+    }
+
+    @Test public void wrongSourceRequestOrActionRefusalCannotCancelTheActiveTap() {
+        report(AlarmStateProtocol.State.ARMED_STAY);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        ArmExperimentProtocol.Attempt active = attempt();
+        byte[] matching = new AlarmStateProtocol.Declined(selected.action, selected.request,
+                AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode();
+        handle("other-phone", AlarmStateProtocol.DECLINED_PATH, matching);
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
+                selected.action, UUID.randomUUID().toString(), AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode());
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
+                AlarmAction.ARM_STAY, selected.request, AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode());
+        assertSame(active, attempt());
+        assertEquals(ArmExperimentProtocol.Phase.AWAITING_CHALLENGE, active.phase());
+        assertTrue(stored().getBoolean("busy", false));
+        assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
+        assertEquals(selected.request, stored().getString("actionRequest", ""));
+        assertEquals(1, sent.size());
+        handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+                ArmExperimentProtocol.encodeChallenge(selected.action, selected.request, UUID.randomUUID().toString()));
+        assertEquals("A correctly matched challenge still commits once", 1, commits());
+    }
+
+    @Test public void earlyRefusalAfterCommitCannotEraseAnUncertainResult() {
+        report(AlarmStateProtocol.State.ARMED_STAY);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        String challenge = UUID.randomUUID().toString();
+        handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+                ArmExperimentProtocol.encodeChallenge(selected.action, selected.request, challenge));
+        ArmExperimentProtocol.Attempt committed = attempt();
+        byte[] refusal = new AlarmStateProtocol.Declined(selected.action, selected.request,
+                AlarmStateProtocol.DeclineReason.STATE_CHANGED).encode();
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, refusal);
+        assertSame(committed, attempt());
+        assertEquals(ArmExperimentProtocol.Phase.AWAITING_RESULT, committed.phase());
+        assertTrue(stored().getBoolean("busy", false));
+        assertTrue(stored().getBoolean("commitMayHaveBeenSent", false));
+        assertFalse(controls().alarmButton.isEnabled());
+
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH,
+                ArmExperimentProtocol.encodeResult(selected.action, selected.request, challenge,
+                        ArmExperimentProtocol.Outcome.REQUESTED));
+        stopQueryTransport();
+        assertNull(attempt());
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, refusal);
+        assertTrue(stored().getBoolean("busy", false));
+        assertTrue(stored().getBoolean("awaiting", false));
+        assertTrue(stored().getBoolean("commitMayHaveBeenSent", false));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertEquals(2, sent.size());
+        assertEquals(1, commits());
+    }
+
+    @Test public void mismatchedDurableRequestPreventsCommitAndLeavesNoUncertainSend() {
+        report(AlarmStateProtocol.State.ARMED_STAY);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        stored().edit().putString("actionRequest", UUID.randomUUID().toString()).commit();
+        handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+                ArmExperimentProtocol.encodeChallenge(selected.action, selected.request, UUID.randomUUID().toString()));
+        stopQueryTransport();
+        assertNull(attempt());
+        assertEquals(1, sent.size());
+        assertEquals(0, commits());
+        assertFalse(stored().getBoolean("busy", false));
+        assertFalse(stored().getBoolean("awaiting", false));
+        assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
+        assertTrue(controls().alarmButton.getText().toString().contains("No action sent"));
+    }
+
     private void mount(Intent intent, Bundle saved, boolean ready) {
         controller = Robolectric.buildActivity(WatchActivity.class, intent).create(saved).start().visible();
         activity = controller.get();
-        ReflectionHelpers.setField(activity, "sender", (WatchActivity.Sender) (node, path, payload, failure) ->
-            sent.add(new Sent(node, path, payload.clone())));
+        ReflectionHelpers.setField(activity, "sender", (WatchActivity.Sender) (node, path, payload, failure) -> {
+            if (AlarmStateProtocol.TOGGLE_PATH.equals(path)) {
+                AlarmStateProtocol.Tap tap = AlarmStateProtocol.parseTap(payload);
+                assertEquals("Request identity is durable before PREPARE transport", tap.request, stored().getString("actionRequest", ""));
+                assertTrue(stored().getBoolean("busy", false));
+                assertFalse("PREPARE must not be recorded as a possible COMMIT", stored().getBoolean("commitMayHaveBeenSent", false));
+            } else if (ArmExperimentProtocol.COMMIT_PATH.equals(path)) {
+                ArmExperimentProtocol.Message commit = ArmExperimentProtocol.parse(payload, ArmExperimentProtocol.Kind.COMMIT);
+                assertEquals(commit.requestId, stored().getString("actionRequest", ""));
+                assertTrue("Possible-send marker is durable before COMMIT transport", stored().getBoolean("commitMayHaveBeenSent", false));
+                assertTrue(stored().getBoolean("busy", false));
+            }
+            sent.add(new Sent(node, path, payload.clone()));
+        });
         if (ready) ready();
     }
 
@@ -280,6 +398,7 @@ public final class WatchActivityFlowTest {
     private void render() { ReflectionHelpers.callInstanceMethod(activity, "render"); }
     private AlarmToggleView controls() { return ReflectionHelpers.getField(activity, "controls"); }
     private ArmExperimentProtocol.Attempt attempt() { return ReflectionHelpers.getField(activity, "attempt"); }
+    private SharedPreferences stored() { return context.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE); }
 
     private void handle(String source, String path, byte[] payload) {
         MessageEvent event = new MessageEvent() {

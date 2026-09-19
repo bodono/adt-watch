@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide covers v0.20. It distinguishes rebuilding the apps from recreating
+This guide covers v0.21. It distinguishes rebuilding the apps from recreating
 their private setup on a phone and watch. The repository provides source;
 Android widget consent, watch association, ADT sign-in and notification access
 are completed by the owner on their devices.
@@ -76,16 +76,16 @@ assume exactly one USB-connected phone. Replace `WATCH_SELECTOR` with your
 watch's selector from `adb devices`:
 
 ```sh
-adb -d install -r build/phone-probe.apk
 adb -s WATCH_SELECTOR install -r build/watch-probe.apk
+adb -d install -r build/phone-probe.apk
 ```
 
 `-r` updates an existing matching-signature installation while retaining its
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
-builds at the same version and signature for fresh installs. The v0.20 watch
-update is also compatible with an already configured v0.17 phone: its message
-protocol is unchanged, so the phone does not need reinstalling for this fix.
+builds at the same version and signature. Update the watch first, then the phone:
+v0.21 adds result-completion and evidence fields to phone reports. Its watch can
+read older phone reports, but both apps need the update for the new recovery.
 
 ## Fresh phone setup
 
@@ -183,7 +183,8 @@ reliable overnight operation and broader compatibility remain unverified.
 - **Grey or uncertain after a tap:** do not repeat it. Check the actual alarm
   state in ADT. Work already queued inside ADT can execute when background
   restrictions lift or ADT opens; the helper cannot recall it. A new ADT state
-  report is needed before offering another coloured action.
+  report is normally needed before offering another coloured action. After 30
+  seconds v0.21 says **Result unconfirmed**, without assuming success or failure.
 - **Grey before any request:** check the phone connection, notification access,
   supported ADT version and availability of a recent, recognized ADT report.
   Refresh only reads status. Reopening ADT Watch alone does not send an alarm
@@ -192,6 +193,17 @@ reliable overnight operation and broader compatibility remain unverified.
   Disarmed report. v0.20 retries read-only status checks briefly and distinguishes
   no phone reply from missing ADT status. Refresh starts another bounded status
   check; it never resends Disarm or automatically arms the system.
+- **Missing notification or stale state after refreshing:** check ADT's Home and
+  Activity screens and allow any previous request to settle. In **ADT Watch
+  Setup → Recover missing status…**, choose the state you have just verified
+  and confirm it. This records your observation without sending an alarm command
+  or cancelling anything queued in ADT. The watch labels it **Checked** and
+  permits it for five minutes; a newer ADT notification replaces it. Check ADT's
+  arm/disarm notification rule covers all users and push notifications are on.
+- **An old coloured Tile is still visible:** v0.21 supplies a finite Tile entry
+  with a grey Refresh fallback. Wear OS schedules the visual switch; tapping an
+  expired entry still cannot bypass the app's independent expiry checks. The
+  displayed date/time is the observation time, not the time of the last refresh.
 - **Changing either scene or widget:** first use **Watch control access… →
   Disable watch controls**. Review the complete scenes again, reconfigure the
   affected widget and repeat **Enable watch controls once…**. Widget setup

@@ -14,6 +14,9 @@ import com.google.android.gms.wearable.Node;
 import com.google.android.gms.wearable.Wearable;
 import java.util.Set;
 import java.util.UUID;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.function.Consumer;
 
 /** Reported ADT state only: this class has no alarm-command transport. */
@@ -101,18 +104,37 @@ final class WatchAlarmStore {
         return readAt(context, SystemClock.elapsedRealtime(), boot(context));
     }
 
+    /** Remaining display lifetime only; consuming an action still rechecks the monotonic state. */
+    static synchronized long remainingActionValidityMillis(Context context) {
+        long now = SystemClock.elapsedRealtime();
+        SharedPreferences p = prefs(context);
+        long issued = p.getLong("tokenIssued", -1);
+        if (p.getBoolean("busy", false) || !trusted(p, boot(context)) || !fresh(p, now)
+                || availability(p) != AlarmStateProtocol.Availability.READY || AlarmStateProtocol.action(state(p)) == null
+                || !AlarmStateProtocol.uuid(p.getString("revision", "")) || !AlarmStateProtocol.uuid(p.getString("token", ""))
+                || issued < 0 || now < issued) return 0;
+        return Math.max(0, Math.min(AlarmStateProtocol.LINK_FRESH_MS - (now - p.getLong("received", -1)),
+                Math.min(AlarmStateProtocol.LINK_FRESH_MS - (now - issued), maxAge(p) - age(p, now))));
+    }
+
     static synchronized ViewState readAt(Context context, long now, int boot) {
         SharedPreferences p = prefs(context);
         recoverPossibleSend(p);
-        if (p.getBoolean("busy", false)) return neutral("Checking alarm", p.getBoolean("awaiting", false)
-                ? statusDetail(p, now, boot, true) : "Request in progress");
+        if (p.getBoolean("busy", false)) {
+            if (p.getBoolean("awaiting", false) && unconfirmed(p, now, boot))
+                return neutral("Result unconfirmed", "Check ADT on your phone");
+            return neutral("Checking alarm", p.getBoolean("awaiting", false)
+                    ? statusDetail(p, now, boot, true) : "Request in progress");
+        }
         AlarmStateProtocol.Availability availability = availability(p);
+        if (availability == AlarmStateProtocol.Availability.UNCONFIRMED)
+            return neutral("Result unconfirmed", "Check ADT on your phone");
         if (!trusted(p, boot) || !fresh(p, now) || availability != AlarmStateProtocol.Availability.READY)
             return neutral("State unknown", statusDetail(p, now, boot, false));
         long age = age(p, now);
         AlarmStateProtocol.State state = state(p);
         AlarmAction action = AlarmStateProtocol.action(state);
-        if (action == null || age > AlarmStateProtocol.MAX_STATE_AGE_MS
+        if (action == null || age > maxAge(p)
                 || !AlarmStateProtocol.uuid(p.getString("revision", "")))
             return neutral("State unknown", "An up-to-date ADT report is needed");
         String token = p.getString("token", "");
@@ -124,7 +146,11 @@ final class WatchAlarmStore {
         }
         String label = state == AlarmStateProtocol.State.DISARMED ? "Disarmed"
                 : state == AlarmStateProtocol.State.ARMED_STAY ? "Armed Stay" : "Armed Away";
-        return new ViewState(label, ageLabel(age), token, action, true);
+        boolean checked = evidence(p) == AlarmStateProtocol.Evidence.PHONE_CHECK;
+        String prefix = checked ? "Checked " : "ADT ";
+        String observedAt = new SimpleDateFormat(checked ? "HH:mm" : "d MMM HH:mm", Locale.getDefault())
+                .format(new Date(Math.max(0, System.currentTimeMillis() - age)));
+        return new ViewState(label, prefix + observedAt, token, action, true);
     }
 
     static void refresh(Context context) {
@@ -253,7 +279,8 @@ final class WatchAlarmStore {
         if (recovery == null) return;
         AlarmStateProtocol.Availability status = availability(prefs(context));
         if (actionable || status == AlarmStateProtocol.Availability.NO_ACCESS
-                || status == AlarmStateProtocol.Availability.SETUP || status == AlarmStateProtocol.Availability.STALE) {
+                || status == AlarmStateProtocol.Availability.SETUP || status == AlarmStateProtocol.Availability.STALE
+                || status == AlarmStateProtocol.Availability.UNCONFIRMED) {
             cancelRecovery();
         } else scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
     }
@@ -278,7 +305,7 @@ final class WatchAlarmStore {
             // Switching source or rebooting removes actionable cache, never a possible-send latch.
             p.edit().putString("source", source).putInt("boot", boot)
                     .remove("token").remove("tokenIssued").remove("revision").remove("seen")
-                    .remove("received").remove("age").remove("state").remove("contactReceived")
+                    .remove("received").remove("age").remove("state").remove("contactReceived").remove("completedRequest").remove("evidence")
                     .putString("availability", AlarmStateProtocol.Availability.OFFLINE.name()).apply();
             changed(context);
         }
@@ -326,6 +353,7 @@ final class WatchAlarmStore {
         long previousReceived = p.getLong("received", -1);
         String seen = p.getString("seen", "");
         if (ready) {
+            if (same && report.evidence != evidence(p)) return false;
             if (same && report.state != state(p)) return false;
             if (same && report.ageMillis < previousAge) return false;
             if (!same && seen.contains("|" + report.revision + "|")) return false;
@@ -341,12 +369,15 @@ final class WatchAlarmStore {
                 return false; // Contact alone must not keep the actionable report fresh forever.
             }
         }
+        boolean checkedAfterCommit = ready && phoneCheckAfterCommit(p, source, report, pending, now, boot);
         if (answer) pending = null;
         SharedPreferences.Editor edit = p.edit();
         boolean wasFresh = fresh(p, now);
         edit.putString("availability", report.availability.name()).putLong("contactReceived", now);
         if (ready) {
-            edit.putString("revision", report.revision).putString("state", report.state.name());
+            edit.putString("revision", report.revision).putString("state", report.state.name())
+                    .putString("completedRequest", report.completedRequest).putString("evidence", report.evidence.name());
+            if (checkedAfterCommit) edit.putString("checkedActionRequest", p.getString("actionRequest", ""));
             if (!same || report.ageMillis > previousAge) {
                 long newAge = same ? Math.max(report.ageMillis, age(p, now)) : report.ageMillis;
                 edit.putLong("age", newAge).putLong("received", now);
@@ -358,7 +389,7 @@ final class WatchAlarmStore {
                 edit.putString("seen", updated);
             }
             if (!same || !wasFresh) edit.remove("token").remove("tokenIssued");
-            if (p.getBoolean("awaiting", false) && changedAfterAction(p, source, report))
+            if (p.getBoolean("awaiting", false) && (changedAfterAction(p, source, report) || checkedAfterCommit))
                 edit.putBoolean("busy", false).putBoolean("awaiting", false).remove("token").remove("tokenIssued");
         } else {
             edit.remove("token").remove("tokenIssued");
@@ -383,7 +414,7 @@ final class WatchAlarmStore {
         SharedPreferences p = prefs(context);
         return selection != null && trusted(p, boot) && fresh(p, now)
                 && availability(p) == AlarmStateProtocol.Availability.READY
-                && age(p, now) <= AlarmStateProtocol.MAX_STATE_AGE_MS
+                && age(p, now) <= maxAge(p)
                 && selection.phone.equals(p.getString("source", ""))
                 && selection.stateRevision.equals(p.getString("revision", ""))
                 && selection.action == AlarmStateProtocol.action(state(p));
@@ -399,6 +430,8 @@ final class WatchAlarmStore {
         activeSelection = selected;
         // Synchronous persistence is intentional: process death must not resurrect this user's tap.
         boolean saved = p.edit().putBoolean("busy", true).putBoolean("awaiting", false)
+                .putLong("actionStarted", now).putBoolean("commitMayHaveBeenSent", false).remove("actionRequest")
+                .remove("commitStarted").remove("commitBoot").remove("checkedActionRequest")
                 .putString("actionSource", selected.phone).putString("actionRevision", selected.stateRevision)
                 .putString("actionState", p.getString("state", "UNKNOWN"))
                 .remove("token").remove("tokenIssued").commit();
@@ -407,16 +440,29 @@ final class WatchAlarmStore {
         return saved ? selected : null;
     }
 
+    static synchronized boolean attachRequest(Context context, Selection selected, String request) {
+        return selected != null && activeSelection == selected && AlarmStateProtocol.uuid(request)
+                && prefs(context).edit().putString("actionRequest", request).commit();
+    }
+
+    static synchronized boolean markCommitting(Context context, Selection selected, String request) {
+        return activeSelection == selected && stillCurrent(context, selected)
+                && request.equals(prefs(context).getString("actionRequest", ""))
+                && prefs(context).edit().putBoolean("commitMayHaveBeenSent", true)
+                    .putLong("commitStarted", SystemClock.elapsedRealtime()).putInt("commitBoot", boot(context)).commit();
+    }
+
     static synchronized void finish(Context context, boolean commandMayHaveBeenSent) {
         SharedPreferences p = prefs(context);
         if (!p.getBoolean("busy", false)) return;
         boolean waiting = commandMayHaveBeenSent;
         if (waiting && availability(p) == AlarmStateProtocol.Availability.READY
                 && trusted(p, boot(context)) && fresh(p, SystemClock.elapsedRealtime())
-                && age(p, SystemClock.elapsedRealtime()) <= AlarmStateProtocol.MAX_STATE_AGE_MS) {
+                && age(p, SystemClock.elapsedRealtime()) <= maxAge(p)) {
             waiting = !changedAfterAction(p, p.getString("source", ""), p.getString("revision", ""), state(p));
         }
         p.edit().putBoolean("busy", waiting).putBoolean("awaiting", waiting)
+                .putBoolean("commitMayHaveBeenSent", waiting)
                 .remove("token").remove("tokenIssued").apply();
         activeSelection = null;
         changed(context);
@@ -426,19 +472,59 @@ final class WatchAlarmStore {
     private static void recoverPossibleSend(SharedPreferences p) {
         if (p.getBoolean("busy", false) && !p.getBoolean("awaiting", false)
                 && (activeSelection == null || !activeSelection.phone.equals(p.getString("actionSource", ""))
-                    || !activeSelection.stateRevision.equals(p.getString("actionRevision", ""))))
-            p.edit().putBoolean("awaiting", true).apply();
+                    || !activeSelection.stateRevision.equals(p.getString("actionRevision", "")))) {
+            if (p.getBoolean("commitMayHaveBeenSent", true)) p.edit().putBoolean("awaiting", true).apply();
+            else p.edit().putBoolean("busy", false).putBoolean("awaiting", false)
+                    .remove("token").remove("tokenIssued").remove("actionRequest").apply();
+        }
     }
 
     private static boolean changedAfterAction(SharedPreferences p, String source, AlarmStateProtocol.Report report) {
         return report.availability == AlarmStateProtocol.Availability.READY
-                && changedAfterAction(p, source, report.revision, report.state);
+                && changedAfterAction(p, source, report.revision, report.state, report.completedRequest, report.evidence);
     }
 
     private static boolean changedAfterAction(SharedPreferences p, String source, String revision, AlarmStateProtocol.State state) {
+        return changedAfterAction(p, source, revision, state, p.getString("completedRequest", "-"), evidence(p));
+    }
+
+    private static boolean changedAfterAction(SharedPreferences p, String source, String revision,
+            AlarmStateProtocol.State state, String completedRequest, AlarmStateProtocol.Evidence evidence) {
+        String request = p.getString("actionRequest", "");
+        // Older installs had no request/start marker and no phone-check feature. A new explicit
+        // phone verification can settle that legacy latch without inventing a completed request id.
+        boolean checkedLegacy = evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
+                && !p.contains("actionStarted") && !AlarmStateProtocol.uuid(request);
         return source.equals(p.getString("actionSource", ""))
                 && !revision.equals(p.getString("actionRevision", ""))
-                && !state.name().equals(p.getString("actionState", ""));
+                && (!state.name().equals(p.getString("actionState", ""))
+                    || AlarmStateProtocol.uuid(request) && (request.equals(completedRequest)
+                        || request.equals(p.getString("checkedActionRequest", ""))) || checkedLegacy);
+    }
+
+    /** A full query round trip bounds the check's age without comparing device clocks. */
+    private static boolean phoneCheckAfterCommit(SharedPreferences p, String source, AlarmStateProtocol.Report report,
+            Query query, long now, int boot) {
+        long committed = p.getLong("commitStarted", -1);
+        if (report.evidence != AlarmStateProtocol.Evidence.PHONE_CHECK
+                || report.availability != AlarmStateProtocol.Availability.READY
+                || !p.getBoolean("busy", false) || !p.getBoolean("commitMayHaveBeenSent", false)
+                || !AlarmStateProtocol.uuid(p.getString("actionRequest", ""))
+                || !source.equals(p.getString("actionSource", ""))
+                || report.revision.equals(p.getString("actionRevision", ""))
+                || committed < 0 || now < committed || p.getInt("commitBoot", -1) != boot
+                || query == null || !queryCurrent(query, now) || !source.equals(query.phone)
+                || !report.request.equals(query.nonce)) return false;
+        long sinceCommit = now - committed, roundTrip = now - query.started;
+        // Subtraction avoids overflow and treats the entire round trip as possible
+        // additional age. A check at/before COMMIT, a push, or an old query cannot settle it.
+        return roundTrip >= 0 && roundTrip < sinceCommit && report.ageMillis < sinceCommit - roundTrip;
+    }
+
+    private static boolean unconfirmed(SharedPreferences p, long now, int boot) {
+        long started = p.getLong("actionStarted", -1);
+        return availability(p) == AlarmStateProtocol.Availability.UNCONFIRMED || !trusted(p, boot)
+                || started < 0 || now < started || now - started >= RECOVERY_MS;
     }
 
     private static synchronized void failQuery(Context context, Query query) {
@@ -478,21 +564,25 @@ final class WatchAlarmStore {
         try { return AlarmStateProtocol.State.valueOf(p.getString("state", "UNKNOWN")); }
         catch (IllegalArgumentException error) { return AlarmStateProtocol.State.UNKNOWN; }
     }
+    private static AlarmStateProtocol.Evidence evidence(SharedPreferences p) {
+        try { return AlarmStateProtocol.Evidence.valueOf(p.getString("evidence", "ADT_NOTIFICATION")); }
+        catch (IllegalArgumentException error) { return AlarmStateProtocol.Evidence.ADT_NOTIFICATION; }
+    }
+    private static long maxAge(SharedPreferences p) {
+        return evidence(p) == AlarmStateProtocol.Evidence.PHONE_CHECK
+                ? AlarmStateProtocol.PHONE_CHECK_FRESH_MS : AlarmStateProtocol.MAX_STATE_AGE_MS;
+    }
     private static AlarmStateProtocol.Availability availability(SharedPreferences p) {
         try { return AlarmStateProtocol.Availability.valueOf(p.getString("availability", "OFFLINE")); }
         catch (IllegalArgumentException error) { return AlarmStateProtocol.Availability.OFFLINE; }
     }
     private static ViewState neutral(String label, String detail) { return new ViewState(label, detail, "", null, false); }
-    private static String ageLabel(long age) {
-        if (age < 60_000) return "ADT update just now";
-        if (age < 3_600_000) return "ADT update " + age / 60_000 + " min ago";
-        return "ADT update " + age / 3_600_000 + " hr ago";
-    }
     private static String detail(AlarmStateProtocol.Availability state) {
         switch (state) {
             case NO_ACCESS: return "Allow ADT status access on your phone";
             case SETUP: return "Finish alarm setup on your phone";
             case BUSY: return "Phone reached; waiting for ADT";
+            case UNCONFIRMED: return "Result unconfirmed; check ADT on your phone";
             case STALE: return "An up-to-date ADT report is needed";
             case NO_STATE: return "Phone reached; no ADT report";
             case OFFLINE: return "Phone reached; ADT status unavailable";

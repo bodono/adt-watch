@@ -47,6 +47,7 @@ public final class AlarmTileService extends TileService {
     // TileService futures must finish within 10 seconds. This is a ceiling, not a delay:
     // completed recovery renders on the next 100ms check.
     private static final long STATUS_WAIT_MS = 8_000;
+    private static final long NEUTRAL_DISPLAY_MS = 30_000;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<RefreshWait<?>> waits = new ArrayList<>();
     interface UpdateSender { void request(Context context); }
@@ -101,6 +102,33 @@ public final class AlarmTileService extends TileService {
     private TileBuilders.Tile buildTile(RequestBuilders.TileRequest request) {
         WatchAlarmStore.ViewState state = WatchAlarmStore.read(this);
         trace("render enabled=" + state.enabled + " refreshing=" + WatchAlarmStore.isRefreshing());
+        boolean busy = getSharedPreferences(WatchAlarmStore.PREFERENCES, MODE_PRIVATE).getBoolean("busy", false);
+        WatchAlarmStore.ViewState fallback = new WatchAlarmStore.ViewState(
+                busy ? "Result unconfirmed" : "Status unknown",
+                busy ? "Check ADT on your phone" : "Refresh to check ADT", "", null, false);
+        long wallNow = Math.max(0, System.currentTimeMillis());
+        long lifetime = actionable(state) ? WatchAlarmStore.remainingActionValidityMillis(this) : NEUTRAL_DISPLAY_MS;
+        lifetime = Math.min(lifetime, Long.MAX_VALUE - wallNow);
+        TimelineBuilders.Timeline.Builder timeline = new TimelineBuilders.Timeline.Builder();
+        if (lifetime > 0) {
+            timeline.addTimelineEntry(new TimelineBuilders.TimelineEntry.Builder()
+                    .setValidity(new TimelineBuilders.TimeInterval.Builder()
+                            .setStartMillis(wallNow).setEndMillis(wallNow + lifetime).build())
+                    .setLayout(layoutFor(state, request)).build());
+        }
+        // A finite entry wins over this default while valid. Outside that window,
+        // including a wall-clock jump, the cached tile offers no alarm action.
+        // Renderer switching can be delayed; Activity's monotonic checks remain authoritative.
+        timeline.addTimelineEntry(new TimelineBuilders.TimelineEntry.Builder()
+                .setLayout(layoutFor(fallback, request)).build());
+        return new TileBuilders.Tile.Builder()
+                .setResourcesVersion(RESOURCES_VERSION)
+                .setFreshnessIntervalMillis(60_000)
+                .setTileTimeline(timeline.build()).build();
+    }
+
+    private LayoutElementBuilders.Layout layoutFor(WatchAlarmStore.ViewState state,
+            RequestBuilders.TileRequest request) {
         int screenWidth = request.getDeviceConfiguration().getScreenWidthDp();
         int screenHeight = request.getDeviceConfiguration().getScreenHeightDp();
         float edge = Math.min(screenWidth > 0 ? screenWidth : 192,
@@ -144,16 +172,7 @@ public final class AlarmTileService extends TileService {
                                 .setColor(ColorBuilders.argb(Color.BLACK)).build()).build())
                 .addContent(content)
                 .build();
-        TileBuilders.Tile tile = new TileBuilders.Tile.Builder()
-                .setResourcesVersion(RESOURCES_VERSION)
-                // Refresh is best effort; it is never the security expiry check.
-                .setFreshnessIntervalMillis(60_000)
-                .setTileTimeline(new TimelineBuilders.Timeline.Builder()
-                        .addTimelineEntry(new TimelineBuilders.TimelineEntry.Builder()
-                                .setLayout(new LayoutElementBuilders.Layout.Builder().setRoot(root).build())
-                                .build()).build())
-                .build();
-        return tile;
+        return new LayoutElementBuilders.Layout.Builder().setRoot(root).build();
     }
 
     /** Keep the service request alive while an asynchronous phone query can answer. */

@@ -22,6 +22,7 @@
         <activity android:name=".WatchSetupActivity" android:exported="false" />
         <activity android:name=".WidgetSetupActivity" android:exported="false" />
         <activity android:name=".RoutineSetupActivity" android:exported="false" />
+        <activity android:name=".StateRecoveryActivity" android:exported="false" />
         <activity android:name=".ArmExperimentActivity" android:exported="false" />
         <service android:name=".ArmExperimentService" android:exported="false"
             android:foregroundServiceType="shortService" android:stopWithTask="true" />

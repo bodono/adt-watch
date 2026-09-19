@@ -195,7 +195,10 @@ public final class ArmExperimentService extends Service {
             ArmExperimentService current = active;
             if (current != null && !current.stopped && !current.finishing) {
                 // A new toggle may never adopt an unrelated already-prepared session.
-                if (toggleRevision != null) return;
+                if (toggleRevision != null) {
+                    declineApproved(app, source, message, AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                    return;
+                }
                 try { current.handle(source, message); }
                 catch (RuntimeException error) {
                     current.stopNow("Experiment message handling failed. No authorization remains; alarm state is unverified.");
@@ -213,11 +216,15 @@ public final class ArmExperimentService extends Service {
     private static void startRoutineReadiness(Context app, String source, ArmExperimentProtocol.Message message,
             String toggleRevision) {
         requireMain();
-        if (message.kind != ArmExperimentProtocol.Kind.PREPARE || isRunning()
-                || !phoneLocked(app) || WidgetSetupActivity.hasListeningHost()) return;
+        if (message.kind != ArmExperimentProtocol.Kind.PREPARE) return;
         RoutineAccess.Snapshot permission = RoutineAccess.snapshot(app);
         if (permission == null || !permission.nodeId.equals(source)) return;
+        if (isRunning() || !phoneLocked(app) || WidgetSetupActivity.hasListeningHost()) {
+            if (toggleRevision != null) sendDeclined(app, source, message, AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+            return;
+        }
         if (toggleRevision != null && !PhoneAlarmState.matches(app, toggleRevision, message.action)) {
+            sendDeclined(app, source, message, AlarmStateProtocol.DeclineReason.STATE_CHANGED);
             PhoneStateLink.publish(app); return;
         }
         if (!RECENT_PREPARES.admit(source, message.action, message.requestId, SystemClock.elapsedRealtime())) return;
@@ -239,6 +246,21 @@ public final class ArmExperimentService extends Service {
             writeStatus(app, "Android could not start watch readiness. No alarm request was sent.");
             Probe.event(app, "Routine readiness startup unavailable; no retry.");
         }
+    }
+
+    private static void declineApproved(Context app, String source, ArmExperimentProtocol.Message message,
+            AlarmStateProtocol.DeclineReason reason) {
+        if (app == null) return;
+        RoutineAccess.Snapshot access = RoutineAccess.snapshot(app);
+        if (access != null && source.equals(access.nodeId)) sendDeclined(app, source, message, reason);
+    }
+
+    private static void sendDeclined(Context app, String source, ArmExperimentProtocol.Message message,
+            AlarmStateProtocol.DeclineReason reason) {
+        try {
+            Wearable.getMessageClient(app).sendMessage(source, AlarmStateProtocol.DECLINED_PATH,
+                    new AlarmStateProtocol.Declined(message.action, message.requestId, reason).encode());
+        } catch (RuntimeException ignored) { /* The watch deadline still ends this unsent attempt. */ }
     }
 
     @Override public void onCreate() {
@@ -532,11 +554,12 @@ public final class ArmExperimentService extends Service {
                 + dispatchWall + "ms, keyguardLocked=" + locked + ", deviceLocked=" + deviceLocked
                 + ", preparingActivityVisible=" + visible + ". Authorization consumed before activation.");
             // Recheck the deadline after logging; delayed work never becomes a queued command.
-            if (fullyLocked() && SystemClock.elapsedRealtime() < challengeUntil
+            requested = host.activateOnce(challengeGeneration, () ->
+                fullyLocked() && SystemClock.elapsedRealtime() < challengeUntil
                     && SystemClock.elapsedRealtime() < sessionUntil && !WidgetSetupActivity.hasListeningHost()
                     && (grant.routine == null || RoutineAccess.stillValid(this, grant.routine))
-                    && (grant.toggleRevision == null || PhoneAlarmState.beginCommand(this, grant.toggleRevision, action)))
-                requested = host.activateOnce(challengeGeneration);
+                    && (grant.toggleRevision == null || PhoneAlarmState.beginCommand(this, grant.toggleRevision, action, requestId)))
+                == WidgetHostSession.Activation.ATTEMPTED;
         } catch (RuntimeException error) {
             Probe.event(this, "Arm experiment activation returned an error; alarm state is unverified.");
         }
@@ -558,10 +581,10 @@ public final class ArmExperimentService extends Service {
         handler.removeCallbacksAndMessages(null);
         closeHost();
         publish(outcome == ArmExperimentProtocol.Outcome.REQUESTED
-            ? action.label() + " widget action requested once. Alarm state is unverified; no retry will occur."
+            ? action.label() + " widget click attempted once. Alarm state is unverified; no retry will occur."
             : action.label() + " experiment rejected. Alarm state is unverified; no retry will occur.");
         Probe.event(this, outcome == ArmExperimentProtocol.Outcome.REQUESTED
-            ? "Arm experiment result: REQUESTED means listener invocation only, not alarm state."
+            ? "Arm experiment result: REQUESTED means native click attempted only, not alarm state."
             : "Arm experiment result: REJECTED; alarm state is unverified.");
         handler.postDelayed(() -> stopNow(null), RESULT_GRACE_MS);
         try {

@@ -7,10 +7,14 @@ public final class AlarmStateProtocol {
     public static final String QUERY_PATH = "/adt-probe/v3/state/query";
     public static final String STATE_PATH = "/adt-probe/v3/state/report";
     public static final String TOGGLE_PATH = "/adt-probe/v3/toggle/prepare";
+    public static final String DECLINED_PATH = "/adt-probe/v3/toggle/declined";
     public static final long MAX_STATE_AGE_MS = 24 * 60 * 60 * 1000L;
     public static final long LINK_FRESH_MS = 60_000;
+    public static final long PHONE_CHECK_FRESH_MS = 5 * 60_000;
     public enum State { UNKNOWN, DISARMED, ARMED_STAY, ARMED_AWAY }
-    public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, SETUP, OFFLINE }
+    public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, UNCONFIRMED, SETUP, OFFLINE }
+    public enum DeclineReason { STATE_CHANGED, UNAVAILABLE }
+    public enum Evidence { ADT_NOTIFICATION, PHONE_CHECK }
     private AlarmStateProtocol() { }
     public static AlarmAction action(State state) {
         if (state == State.DISARMED) return AlarmAction.ARM_STAY;
@@ -35,27 +39,43 @@ public final class AlarmStateProtocol {
         return f != null && f.length == 3 && "ADT-STATE/1".equals(f[0]) && "QUERY".equals(f[1]) && uuid(f[2]) ? f[2] : null;
     }
     public static final class Report {
-        public final String request, revision;
+        public final String request, revision, completedRequest;
         public final State state;
         public final Availability availability;
         public final long ageMillis;
+        public final Evidence evidence;
         public Report(String request, State state, Availability availability, String revision, long ageMillis) {
+            this(request, state, availability, revision, ageMillis, "-");
+        }
+        public Report(String request, State state, Availability availability, String revision, long ageMillis,
+                String completedRequest) {
+            this(request, state, availability, revision, ageMillis, completedRequest, Evidence.ADT_NOTIFICATION);
+        }
+        public Report(String request, State state, Availability availability, String revision, long ageMillis,
+                String completedRequest, Evidence evidence) {
             if (!(uuid(request) || "-".equals(request)) || state == null || availability == null
                     || !(uuid(revision) || "-".equals(revision)) || ageMillis < 0
+                    || !(uuid(completedRequest) || "-".equals(completedRequest)) || evidence == null
                     || availability == Availability.READY && (action(state) == null || !uuid(revision)
-                        || ageMillis > MAX_STATE_AGE_MS)) throw new IllegalArgumentException("Invalid state report");
+                        || ageMillis > (evidence == Evidence.PHONE_CHECK ? PHONE_CHECK_FRESH_MS : MAX_STATE_AGE_MS)))
+                throw new IllegalArgumentException("Invalid state report");
             this.request = request; this.state = state; this.availability = availability;
             this.revision = revision; this.ageMillis = ageMillis;
+            this.completedRequest = completedRequest;
+            this.evidence = evidence;
         }
         public byte[] encode() {
-            return bytes("ADT-STATE/1\nSTATE\n" + request + "\n" + state + "\n" + availability + "\n" + revision + "\n" + ageMillis);
+            return bytes("ADT-STATE/2\nSTATE\n" + request + "\n" + state + "\n" + availability + "\n" + revision + "\n" + ageMillis
+                    + "\n" + completedRequest + "\n" + evidence);
         }
     }
     public static Report parseReport(byte[] bytes) {
         String[] f = fields(bytes);
-        if (f == null || f.length != 7 || !"ADT-STATE/1".equals(f[0]) || !"STATE".equals(f[1])
+        if (f == null || !(f.length == 7 && "ADT-STATE/1".equals(f[0])
+                    || f.length == 9 && "ADT-STATE/2".equals(f[0])) || !"STATE".equals(f[1])
                 || !f[6].matches("0|[1-9][0-9]{0,18}")) return null;
-        try { return new Report(f[2], State.valueOf(f[3]), Availability.valueOf(f[4]), f[5], Long.parseLong(f[6])); }
+        try { return new Report(f[2], State.valueOf(f[3]), Availability.valueOf(f[4]), f[5], Long.parseLong(f[6]),
+                f.length == 9 ? f[7] : "-", f.length == 9 ? Evidence.valueOf(f[8]) : Evidence.ADT_NOTIFICATION); }
         catch (IllegalArgumentException e) { return null; }
     }
     public static final class Tap {
@@ -72,5 +92,23 @@ public final class AlarmStateProtocol {
         if (f == null || f.length != 4 || !"ADT-TOGGLE/1".equals(f[0])) return null;
         try { return new Tap(AlarmAction.valueOf(f[1]), f[2], f[3]); }
         catch (IllegalArgumentException e) { return null; }
+    }
+
+    /** A matched pre-commit refusal cannot authorize any alarm action. */
+    public static final class Declined {
+        public final AlarmAction action;
+        public final String request;
+        public final DeclineReason reason;
+        public Declined(AlarmAction action, String request, DeclineReason reason) {
+            if (action == null || !uuid(request) || reason == null) throw new IllegalArgumentException("Invalid refusal");
+            this.action = action; this.request = request; this.reason = reason;
+        }
+        public byte[] encode() { return bytes("ADT-DECLINED/1\n" + action + "\n" + request + "\n" + reason); }
+    }
+    public static Declined parseDeclined(byte[] payload) {
+        String[] f = fields(payload);
+        if (f == null || f.length != 4 || !"ADT-DECLINED/1".equals(f[0])) return null;
+        try { return new Declined(AlarmAction.valueOf(f[1]), f[2], DeclineReason.valueOf(f[3])); }
+        catch (IllegalArgumentException error) { return null; }
     }
 }

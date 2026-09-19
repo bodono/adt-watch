@@ -20,6 +20,7 @@ import android.widget.ProgressBar;
 import android.widget.RemoteViews;
 import android.widget.TextView;
 import java.util.Collections;
+import java.util.function.BooleanSupplier;
 
 /**
  * One offscreen session for the user's already configured, reviewed widget for one fixed action.
@@ -28,7 +29,7 @@ import java.util.Collections;
  * This class does not authorize an alarm action: a service must independently enforce explicit
  * reviewed setup or short-lived phone preparation, fresh watch confirmation/source, and phone locks.
  * It never allocates/deletes/binds widgets, reads a PendingIntent, or retries an activation.
- * A true activation result means only that the native View's listener was invoked.
+ * An attempted activation means only that the native View's click was invoked.
  */
 final class WidgetHostSession implements AutoCloseable {
     static final int HOST_ID = 0x41445401;
@@ -204,17 +205,32 @@ final class WidgetHostSession implements AutoCloseable {
             + " " + name + "Max=" + bar.getMax() + " " + name + "Indeterminate=" + bar.isIndeterminate();
     }
 
-    /** External authorization/lock/source/expiry guards are mandatory immediately before this call. */
+    enum Activation { NOT_ATTEMPTED, ATTEMPTED }
+
+    /** Compatibility for inert callers; true includes an uncertain native click result. */
     boolean activateOnce(long expectedGeneration) {
+        return activateOnce(expectedGeneration, () -> true) == Activation.ATTEMPTED;
+    }
+
+    /**
+     * External authorization/lock/source/expiry guards are mandatory. The synchronous
+     * beforeClick callback persists the command only after the final host checks.
+     */
+    Activation activateOnce(long expectedGeneration, BooleanSupplier beforeClick) {
         mainThread();
-        if (expectedGeneration != generation || !isReady()) return false;
+        if (expectedGeneration != generation || !isReady()) return Activation.NOT_ATTEMPTED;
         View target = target();
-        if (target == null || expectedGeneration != generation) return false;
-        // Consume BEFORE calling foreign UI code: even exception/reentrancy/false means no retry.
+        if (target == null || expectedGeneration != generation) return Activation.NOT_ATTEMPTED;
+        // Reserve the one-shot before the callback too: reentrancy cannot attempt a second click.
         consumed = true;
+        if (!beforeClick.getAsBoolean()) {
+            status = "Widget activation blocked before native click; no request was attempted.";
+            return Activation.NOT_ATTEMPTED;
+        }
         status = "Widget activation attempted; alarm state is unverified.";
-        try { return target.performClick(); }
-        catch (RuntimeException ignored) { return false; }
+        try { target.performClick(); }
+        catch (RuntimeException ignored) { /* Foreign code may already have submitted its action. */ }
+        return Activation.ATTEMPTED;
     }
 
     @Override public void close() {

@@ -13,6 +13,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.UUID;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -123,6 +124,191 @@ public final class PhoneAlarmStateTest {
         assertEquals(AlarmStateProtocol.Availability.BUSY, ledger.availability(EVENT + 6_000, true));
         ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 6_000));
         assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + 6_000, true));
+    }
+
+    @Test public void newerSameStateConfirmsExactRequestWithoutInventingATransition() {
+        PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
+        String request = UUID.randomUUID().toString();
+        ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT));
+        ledger.begin(EVENT + 5_000, request);
+        assertEquals(request, ledger.pendingRequest);
+        assertEquals("-", ledger.completedRequest);
+        ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT + 6_000));
+        assertEquals(AlarmStateProtocol.State.DISARMED, ledger.state);
+        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + 6_000, true));
+        assertEquals(0, ledger.pendingAfter);
+        assertEquals("-", ledger.pendingRequest);
+        assertEquals(request, ledger.completedRequest);
+        String next = UUID.randomUUID().toString();
+        ledger.begin(EVENT + 7_000, next);
+        assertEquals(next, ledger.pendingRequest);
+        assertEquals("-", ledger.completedRequest);
+    }
+
+    @Test public void duplicateOlderEqualAndConflictingEventsCannotConfirmPendingRequest() {
+        PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
+        String request = UUID.randomUUID().toString();
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
+        ledger.begin(EVENT + 5_000, request);
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
+        ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT - 1_000));
+        ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT + 5_000));
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 5_000));
+        assertEquals(EVENT + 5_000, ledger.pendingAfter);
+        assertEquals(request, ledger.pendingRequest);
+        assertEquals("-", ledger.completedRequest);
+        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT + 6_000, true));
+    }
+
+    @Test public void confirmationDeadlineChangesMessageButNeverReleasesPendingRequest() {
+        PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
+        String request = UUID.randomUUID().toString();
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
+        ledger.begin(EVENT + 5_000, request);
+        assertEquals(AlarmStateProtocol.Availability.BUSY,
+            ledger.availability(EVENT + 5_000 + PhoneAlarmState.COMMAND_CONFIRMATION_MILLIS - 1, true));
+        assertEquals(AlarmStateProtocol.Availability.UNCONFIRMED,
+            ledger.availability(EVENT + 5_000 + PhoneAlarmState.COMMAND_CONFIRMATION_MILLIS, true));
+        assertEquals(AlarmStateProtocol.Availability.UNCONFIRMED,
+            ledger.availability(EVENT + 12 * 60 * 60 * 1000L, true));
+        assertEquals(EVENT + 5_000, ledger.pendingAfter);
+        assertEquals(request, ledger.pendingRequest);
+        assertEquals("-", ledger.completedRequest);
+        assertEquals(AlarmStateProtocol.Availability.UNCONFIRMED, ledger.availability(EVENT, true));
+    }
+
+    @Test public void invalidRequestCannotConsumeReadyRevisionOrPersistPending() {
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{notification("Disarmed", System.currentTimeMillis() - 120_000)});
+        String revision = PhoneAlarmState.snapshot(context).revision;
+        for (String request : new String[]{null, "-", "not-a-request", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"}) {
+            assertFalse(PhoneAlarmState.beginCommand(context, revision, AlarmAction.ARM_STAY, request));
+            assertEquals(revision, PhoneAlarmState.snapshot(context).revision);
+            assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        }
+        assertEquals(0, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getLong("pending_after_ms", 0));
+    }
+
+    @Test public void unconfirmedPendingSurvivesRestartAndNewerSameStateCompletionPersists() {
+        StatusBarNotification old = notification("Armed Stay", System.currentTimeMillis() - 120_000);
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{old});
+        String revision = PhoneAlarmState.snapshot(context).revision;
+        String request = UUID.randomUUID().toString();
+        assertTrue(PhoneAlarmState.beginCommand(context, revision, AlarmAction.DISARM, request));
+        // The ledger uses wall-clock notification times; Robolectric's elapsed-clock advance
+        // does not advance System.currentTimeMillis(). Load an aged persisted request instead.
+        context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putLong("pending_after_ms", System.currentTimeMillis() - PhoneAlarmState.COMMAND_CONFIRMATION_MILLIS - 1).commit();
+        restartListener(old);
+        assertEquals(AlarmStateProtocol.Availability.UNCONFIRMED, PhoneAlarmState.snapshot(context).availability);
+        assertTrue(PhoneAlarmState.setupStatus(context).contains("Result not confirmed"));
+        assertFalse(PhoneAlarmState.beginCommand(context, PhoneAlarmState.snapshot(context).revision, AlarmAction.DISARM,
+            UUID.randomUUID().toString()));
+        assertEquals(request, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getString("pending_request", "-"));
+        StatusBarNotification newer = notification("Armed Stay", System.currentTimeMillis());
+        PhoneAlarmState.posted(context, newer);
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(request, PhoneAlarmState.snapshot(context).completedRequest);
+        restartListener(newer);
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(request, PhoneAlarmState.snapshot(context).completedRequest);
+        assertEquals(0, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getLong("pending_after_ms", -1));
+    }
+
+    @Test public void legacyPendingRemainsUnconfirmedUntilNewReportWithoutInventingRequestId() {
+        PhoneAlarmState.listenerConnecting(context);
+        StatusBarNotification old = notification("Armed Stay", System.currentTimeMillis() - 120_000);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{old});
+        context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putLong("pending_after_ms", System.currentTimeMillis() - 60_000)
+            .remove("pending_request").remove("completed_request").commit();
+        restartListener(old);
+        assertEquals(AlarmStateProtocol.Availability.UNCONFIRMED, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("-", PhoneAlarmState.snapshot(context).completedRequest);
+        PhoneAlarmState.posted(context, notification("Disarmed", System.currentTimeMillis()));
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("-", PhoneAlarmState.snapshot(context).completedRequest);
+    }
+
+    @Test public void sameTimeConflictAfterRestartRevokesCompletionAndRestoresOriginalPending() {
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{notification("Armed Stay", System.currentTimeMillis() - 120_000)});
+        String request = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        long started = now - 2_000;
+        assertTrue(PhoneAlarmState.beginCommand(context, PhoneAlarmState.snapshot(context).revision, AlarmAction.DISARM, request));
+        // Backdate only this persisted fixture so all notifications have real past wall times.
+        context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putLong("pending_after_ms", started).commit();
+        long confirmed = now - 1_000;
+        StatusBarNotification newer = notification("Disarmed", confirmed);
+        PhoneAlarmState.posted(context, newer);
+        assertEquals(request, PhoneAlarmState.snapshot(context).completedRequest);
+        restartListener(newer);
+        PhoneAlarmState.posted(context, notification("Armed Stay", confirmed));
+        assertEquals(AlarmStateProtocol.Availability.NO_STATE, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("-", PhoneAlarmState.snapshot(context).completedRequest);
+        assertEquals(started, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getLong("pending_after_ms", 0));
+        assertEquals(request, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getString("pending_request", "-"));
+        PhoneAlarmState.posted(context, notification("Disarmed", now));
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(request, PhoneAlarmState.snapshot(context).completedRequest);
+    }
+
+    @Test public void phoneCheckHasDistinctEvidenceCompletesPendingAndExpiresAfterFiveMinutes() {
+        PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
+        String request = UUID.randomUUID().toString();
+        ledger.begin(EVENT + 1_000, request);
+        assertTrue(ledger.recordPhoneCheck(AlarmStateProtocol.State.ARMED_STAY, EVENT + 2_000));
+        assertEquals(AlarmStateProtocol.Evidence.PHONE_CHECK, ledger.evidence);
+        assertEquals(request, ledger.completedRequest);
+        assertEquals(0, ledger.pendingAfter);
+        assertEquals(AlarmStateProtocol.Availability.READY,
+            ledger.availability(EVENT + 2_000 + AlarmStateProtocol.PHONE_CHECK_FRESH_MS, true));
+        assertEquals(AlarmStateProtocol.Availability.STALE,
+            ledger.availability(EVENT + 2_000 + AlarmStateProtocol.PHONE_CHECK_FRESH_MS + 1, true));
+        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT + 2_000, false));
+        assertFalse("A manual observation cannot impersonate an active ADT notification",
+            ledger.isLatest(parse("Armed Stay", "Inert Home", "123456", EVENT + 2_000)));
+    }
+
+    @Test public void phoneCheckRejectsUnknownScopeAmbiguityAndNonAdvancingClock() {
+        PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT));
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
+        assertFalse(ledger.recordPhoneCheck(null, EVENT + 1_000));
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.UNKNOWN, EVENT + 1_000));
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT));
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT - 1));
+        ledger.begin(EVENT + 1_000, UUID.randomUUID().toString());
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT + 1_000));
+        ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT));
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT + 2_000));
+        ledger.accept(parse("Armed Stay", "Other Home", "123456", EVENT + 2_000));
+        assertFalse(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT + 3_000));
+    }
+
+    @Test public void newerNotificationReplacesCheckedEvidenceAndOlderNotificationCannotRegressIt() {
+        PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
+        ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
+        assertTrue(ledger.recordPhoneCheck(AlarmStateProtocol.State.DISARMED, EVENT + 2_000));
+        assertFalse(ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 1_000)));
+        assertEquals(AlarmStateProtocol.Evidence.PHONE_CHECK, ledger.evidence);
+        assertEquals(AlarmStateProtocol.State.DISARMED, ledger.state);
+        assertTrue(ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 3_000)));
+        assertEquals(AlarmStateProtocol.Evidence.ADT_NOTIFICATION, ledger.evidence);
+        assertTrue(ledger.isLatest(parse("Armed Stay", "Inert Home", "123456", EVENT + 3_000)));
+        assertEquals(AlarmStateProtocol.Availability.READY,
+            ledger.availability(EVENT + 3_000 + AlarmStateProtocol.PHONE_CHECK_FRESH_MS + 1, true));
+    }
+
+    private void restartListener(StatusBarNotification event) {
+        for (String name : new String[]{"connected", "reconciled", "connectionHasLatest", "storageFailed"})
+            ReflectionHelpers.setStaticField(PhoneAlarmState.class, name, false);
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{event});
     }
 
     @Test public void ttlFutureEventAndUnreconciledGapCannotBecomeReady() {

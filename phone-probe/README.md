@@ -1,6 +1,6 @@
 # ADT Watch Setup — phone module
 
-The v0.20 Android companion hosts two user-configured native UK ADT scene widgets
+The v0.21 Android companion hosts two user-configured native UK ADT scene widgets
 and handles requests from one explicitly approved watch. It uses the installed
 ADT app for alarm execution; it does not contain ADT credentials or a direct
 ADT service client.
@@ -20,6 +20,12 @@ helper records normalized state and timing, a hashed scope and request/state
 bookkeeping; it does not store notification bodies. A widget invocation means
 only that the native widget listener was invoked. New state is shown after ADT
 reports it.
+
+v0.21 ties pending requests to completion reports, including same-state
+notifications. An unconfirmed result is shown after 30 seconds without clearing
+the pending request. **Recover missing status…** records an explicitly checked
+state on an unlocked phone, with separate provenance and a five-minute lifetime;
+it neither operates the alarm nor cancels anything queued in ADT.
 
 The short service validates a fresh state-bound request and matching commit,
 invokes one widget listener at most once, and does not automatically retry or

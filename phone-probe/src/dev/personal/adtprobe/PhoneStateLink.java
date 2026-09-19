@@ -35,6 +35,6 @@ final class PhoneStateLink {
     }
     private static AlarmStateProtocol.Report report(Context context, String request) {
         PhoneAlarmState.Snapshot s = PhoneAlarmState.snapshot(context);
-        return new AlarmStateProtocol.Report(request, s.state, s.availability, s.revision, s.ageMillis);
+        return new AlarmStateProtocol.Report(request, s.state, s.availability, s.revision, s.ageMillis, s.completedRequest, s.evidence);
     }
 }

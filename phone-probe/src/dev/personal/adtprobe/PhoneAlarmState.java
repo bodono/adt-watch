@@ -1,5 +1,6 @@
 package dev.personal.adtprobe;
 
+import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.content.ComponentName;
@@ -19,11 +20,12 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Latest exact ADT panel report, never an inferred result of sending a scene. */
+/** Latest exact ADT report or explicit phone check, never an inferred result of sending a scene. */
 final class PhoneAlarmState {
     static final String ADT_PACKAGE = "com.adtuk.adtukalarm";
     static final String PREFERENCES = "reported_alarm_state";
     static final long MAX_AGE_MILLIS = 24 * 60 * 60 * 1000L;
+    static final long COMMAND_CONFIRMATION_MILLIS = 30_000;
     private static final Pattern TITLE = Pattern.compile("^([^\\r\\n()]+) (Disarmed|Armed Stay|Armed Away) \\(([^\\r\\n()]+)\\)$");
     private static final Pattern BODY = Pattern.compile("^([^\\r\\n]+?): ([^\\r\\n()]+) was (Disarmed|Armed Stay|Armed Away) at ([0-9]{2}:[0-9]{2}) on ([0-9]{2}/[0-9]{2}/[0-9]{4})\\. \\(([^\\r\\n()]+)\\)$");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd/MM/uuuu HH:mm", Locale.UK)
@@ -34,11 +36,14 @@ final class PhoneAlarmState {
 
     static final class Snapshot {
         final AlarmStateProtocol.State state;
-        final String revision;
+        final String revision, completedRequest;
         final long ageMillis;
         final AlarmStateProtocol.Availability availability;
-        Snapshot(AlarmStateProtocol.State state, String revision, long ageMillis, AlarmStateProtocol.Availability availability) {
+        final AlarmStateProtocol.Evidence evidence;
+        Snapshot(AlarmStateProtocol.State state, String revision, long ageMillis, AlarmStateProtocol.Availability availability,
+                String completedRequest, AlarmStateProtocol.Evidence evidence) {
             this.state = state; this.revision = revision; this.ageMillis = ageMillis; this.availability = availability;
+            this.completedRequest = completedRequest; this.evidence = evidence;
         }
     }
 
@@ -52,7 +57,7 @@ final class PhoneAlarmState {
         else if (storageFailed) availability = AlarmStateProtocol.Availability.NO_STATE;
         else availability = ledger.availability(System.currentTimeMillis(), connectionHasLatest);
         return new Snapshot(availability == AlarmStateProtocol.Availability.READY ? ledger.state : AlarmStateProtocol.State.UNKNOWN,
-            ledger.revision, age, availability);
+            ledger.revision, age, availability, ledger.completedRequest, ledger.evidence);
     }
 
     static synchronized boolean matches(Context context, String revision, AlarmAction action) {
@@ -63,11 +68,31 @@ final class PhoneAlarmState {
 
     /** Consumes the displayed revision durably before any native scene activation. */
     static synchronized boolean beginCommand(Context context, String revision, AlarmAction action) {
-        if (!matches(context, revision, action)) return false;
+        return beginCommand(context, revision, action, UUID.randomUUID().toString());
+    }
+
+    static synchronized boolean beginCommand(Context context, String revision, AlarmAction action, String requestId) {
+        if (!AlarmStateProtocol.uuid(requestId) || !matches(context, revision, action)) return false;
         Ledger ledger = read(context);
-        ledger.begin(System.currentTimeMillis());
+        ledger.begin(System.currentTimeMillis(), requestId);
         if (!write(context, ledger)) return false;
         changed(context);
+        return true;
+    }
+
+    /** Called only after an explicit, current confirmation in the private phone recovery screen. */
+    static synchronized boolean recordPhoneCheck(Activity activity, AlarmStateProtocol.State checked, String expectedRevision) {
+        if (activity == null || !AlarmStateProtocol.uuid(expectedRevision) || !RoutineAccess.visibleUnlocked(activity) || ArmExperimentService.isRunning()
+                || WidgetSetupActivity.hasListeningHost() || !connected || !reconciled
+                || !permissionGranted(activity) || !validAdt(activity) || RoutineAccess.snapshot(activity) == null) return false;
+        Ledger ledger = read(activity);
+        if (storageFailed || !expectedRevision.equals(ledger.revision)
+                || !ledger.recordPhoneCheck(checked, System.currentTimeMillis())) return false;
+        if (!write(activity, ledger)) return false;
+        // This observed status is usable only in the currently connected listener session.
+        // Reconnection still requires normal reconciliation with actual ADT notifications.
+        connectionHasLatest = connected && reconciled;
+        changed(activity);
         return true;
     }
 
@@ -81,12 +106,17 @@ final class PhoneAlarmState {
     static String setupStatus(Context context) {
         Snapshot value = snapshot(context);
         switch (value.availability) {
-            case READY: return "ADT last reported " + stateLabel(value.state) + ". State notifications are enabled.";
+            case READY: return value.evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
+                ? "You checked " + stateLabel(value.state) + " on this phone. This checked status expires after 5 minutes."
+                : "ADT last reported " + stateLabel(value.state) + ". State notifications are enabled.";
             case NO_ACCESS: return "Allow notification access to receive ADT alarm state.";
             case SETUP: return "The supported ADT app version is required for state reports.";
             case OFFLINE: return "Waiting for the ADT notification listener to connect.";
-            case STALE: return "The latest ADT state report is over 24 hours old. Check ADT.";
+            case STALE: return value.evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
+                ? "Your checked status has expired. Check ADT again or wait for a new ADT state report."
+                : "The latest ADT state report is over 24 hours old. Check ADT.";
             case BUSY: return "Waiting for a newer ADT state report after the last request.";
+            case UNCONFIRMED: return "Result not confirmed. Check ADT before sending another request.";
             default: return "Alarm state is unknown. A clear ADT Armed or Disarmed notification is needed.";
         }
     }
@@ -133,7 +163,8 @@ final class PhoneAlarmState {
 
     private static void changed(Context context) {
         // No notification text, account, home, panel or notification identifiers leave this class.
-        PhoneStateLink.publish(context.getApplicationContext());
+        try { PhoneStateLink.publish(context.getApplicationContext()); }
+        catch (RuntimeException ignored) { /* Publication cannot undo or interrupt a durable command decision. */ }
     }
 
     private static boolean validAdt(Context context) {
@@ -213,36 +244,88 @@ final class PhoneAlarmState {
     /** Pure ordering/pending model, also exercised with inert test events. */
     static final class Ledger {
         AlarmStateProtocol.State state = AlarmStateProtocol.State.UNKNOWN;
-        String scope = "", revision = UUID.randomUUID().toString();
-        long eventMillis, conflictMillis, pendingAfter;
+        AlarmStateProtocol.Evidence evidence = AlarmStateProtocol.Evidence.ADT_NOTIFICATION;
+        String scope = "", revision = UUID.randomUUID().toString(), pendingRequest = "-", completedRequest = "-";
+        long eventMillis, conflictMillis, pendingAfter, completionPendingAfter;
         boolean ambiguous;
 
         boolean accept(Event event) {
             if (ambiguous) return false;
             if (scope.isEmpty()) scope = event.scope;
-            if (!scope.equals(event.scope)) { ambiguous = true; revise(); return true; }
+            if (!scope.equals(event.scope)) { ambiguous = true; revokeCompletion(); revise(); return true; }
             if (event.millis < eventMillis) return false;
             if (event.millis == eventMillis) {
-                if (event.state != state && conflictMillis != eventMillis) { conflictMillis = eventMillis; revise(); return true; }
+                if (event.state != state && conflictMillis != eventMillis) {
+                    conflictMillis = eventMillis;
+                    revokeCompletion();
+                    revise();
+                    return true;
+                }
                 return false;
             }
             state = event.state; eventMillis = event.millis; conflictMillis = 0;
-            if (pendingAfter > 0 && eventMillis > pendingAfter) pendingAfter = 0;
+            evidence = AlarmStateProtocol.Evidence.ADT_NOTIFICATION;
+            if (pendingAfter > 0 && eventMillis > pendingAfter) {
+                // A newer report confirms the outcome even when an idempotent scene leaves the state unchanged.
+                completedRequest = pendingRequest;
+                completionPendingAfter = pendingAfter;
+                pendingAfter = 0;
+                pendingRequest = "-";
+            } else completionPendingAfter = 0;
             revise();
             return true;
         }
 
         boolean isLatest(Event event) {
-            return !ambiguous && conflictMillis == 0 && scope.equals(event.scope) && eventMillis == event.millis && state == event.state;
+            return evidence == AlarmStateProtocol.Evidence.ADT_NOTIFICATION && !ambiguous && conflictMillis == 0
+                && scope.equals(event.scope) && eventMillis == event.millis && state == event.state;
         }
 
-        void begin(long now) { pendingAfter = Math.max(now, eventMillis); revise(); }
+        boolean recordPhoneCheck(AlarmStateProtocol.State checked, long now) {
+            if (actionFor(checked) == null || ambiguous || conflictMillis > 0 || !scope.matches("[0-9a-f]{64}")
+                    || eventMillis <= 0 || now <= eventMillis || now <= pendingAfter) return false;
+            state = checked;
+            evidence = AlarmStateProtocol.Evidence.PHONE_CHECK;
+            eventMillis = now;
+            if (pendingAfter > 0) {
+                completedRequest = pendingRequest;
+                completionPendingAfter = pendingAfter;
+                pendingAfter = 0;
+                pendingRequest = "-";
+            } else completionPendingAfter = 0;
+            revise();
+            return true;
+        }
+
+        void begin(long now) { begin(now, "-"); }
+
+        void begin(long now, String request) {
+            if (!(AlarmStateProtocol.uuid(request) || "-".equals(request))) throw new IllegalArgumentException("Invalid pending request");
+            pendingAfter = Math.max(now, eventMillis);
+            pendingRequest = request;
+            completedRequest = "-";
+            completionPendingAfter = 0;
+            revise();
+        }
+
+        private void revokeCompletion() {
+            // Two contradictory notifications can arrive separately, including across a process restart.
+            // Restore the unresolved request if the notification that completed it proves ambiguous.
+            if (completionPendingAfter == 0) return;
+            pendingAfter = completionPendingAfter;
+            pendingRequest = completedRequest;
+            completedRequest = "-";
+            completionPendingAfter = 0;
+        }
 
         AlarmStateProtocol.Availability availability(long now, boolean hasLatest) {
             if (ambiguous || conflictMillis > 0) return AlarmStateProtocol.Availability.NO_STATE;
-            if (pendingAfter > 0) return AlarmStateProtocol.Availability.BUSY;
+            if (pendingAfter > 0) return now < pendingAfter || now - pendingAfter >= COMMAND_CONFIRMATION_MILLIS
+                ? AlarmStateProtocol.Availability.UNCONFIRMED : AlarmStateProtocol.Availability.BUSY;
             if (!hasLatest || eventMillis <= 0 || state == AlarmStateProtocol.State.UNKNOWN) return AlarmStateProtocol.Availability.NO_STATE;
-            if (now < eventMillis || now - eventMillis > MAX_AGE_MILLIS) return AlarmStateProtocol.Availability.STALE;
+            long maxAge = evidence == AlarmStateProtocol.Evidence.PHONE_CHECK
+                ? AlarmStateProtocol.PHONE_CHECK_FRESH_MS : MAX_AGE_MILLIS;
+            if (now < eventMillis || now - eventMillis > maxAge) return AlarmStateProtocol.Availability.STALE;
             return AlarmStateProtocol.Availability.READY;
         }
 
@@ -254,15 +337,25 @@ final class PhoneAlarmState {
         try {
             SharedPreferences stored = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
             ledger.state = AlarmStateProtocol.State.valueOf(stored.getString("state", "UNKNOWN"));
+            ledger.evidence = AlarmStateProtocol.Evidence.valueOf(stored.getString("evidence", "ADT_NOTIFICATION"));
             ledger.scope = stored.getString("scope_hash", "");
             ledger.revision = stored.getString("revision", ledger.revision);
             UUID.fromString(ledger.revision);
             ledger.eventMillis = stored.getLong("event_ms", 0);
             ledger.conflictMillis = stored.getLong("conflict_ms", 0);
             ledger.pendingAfter = stored.getLong("pending_after_ms", 0);
+            ledger.pendingRequest = stored.getString("pending_request", "-");
+            ledger.completedRequest = stored.getString("completed_request", "-");
+            ledger.completionPendingAfter = stored.getLong("completion_pending_after_ms", 0);
             ledger.ambiguous = stored.getBoolean("ambiguous", false);
-            if (ledger.eventMillis < 0 || ledger.conflictMillis < 0 || ledger.pendingAfter < 0
-                    || (!ledger.scope.isEmpty() && !ledger.scope.matches("[0-9a-f]{64}"))) throw new IllegalStateException();
+            if (ledger.eventMillis < 0 || ledger.conflictMillis < 0 || ledger.pendingAfter < 0 || ledger.completionPendingAfter < 0
+                    || (!ledger.scope.isEmpty() && !ledger.scope.matches("[0-9a-f]{64}"))
+                    || !(AlarmStateProtocol.uuid(ledger.pendingRequest) || "-".equals(ledger.pendingRequest))
+                    || !(AlarmStateProtocol.uuid(ledger.completedRequest) || "-".equals(ledger.completedRequest))
+                    || ledger.pendingAfter == 0 && !"-".equals(ledger.pendingRequest)
+                    || ledger.pendingAfter > 0 && !"-".equals(ledger.completedRequest)
+                    || ledger.completionPendingAfter > 0 && (ledger.pendingAfter > 0
+                        || ledger.completionPendingAfter >= ledger.eventMillis)) throw new IllegalStateException();
         } catch (RuntimeException failure) { storageFailed = true; return new Ledger(); }
         return ledger;
     }
@@ -270,9 +363,12 @@ final class PhoneAlarmState {
     private static boolean write(Context context, Ledger ledger) {
         try {
             boolean saved = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().clear()
-                .putString("state", ledger.state.name()).putString("scope_hash", ledger.scope).putString("revision", ledger.revision)
+                .putString("state", ledger.state.name()).putString("evidence", ledger.evidence.name())
+                .putString("scope_hash", ledger.scope).putString("revision", ledger.revision)
                 .putLong("event_ms", ledger.eventMillis).putLong("conflict_ms", ledger.conflictMillis)
-                .putLong("pending_after_ms", ledger.pendingAfter).putBoolean("ambiguous", ledger.ambiguous).commit();
+                .putLong("pending_after_ms", ledger.pendingAfter).putString("pending_request", ledger.pendingRequest)
+                .putString("completed_request", ledger.completedRequest).putLong("completion_pending_after_ms", ledger.completionPendingAfter)
+                .putBoolean("ambiguous", ledger.ambiguous).commit();
             storageFailed = !saved;
             return saved;
         } catch (RuntimeException failure) { storageFailed = true; return false; }

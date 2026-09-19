@@ -6,7 +6,10 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
 import androidx.wear.tiles.EventBuilders;
+import androidx.wear.protolayout.ActionBuilders;
 import androidx.wear.protolayout.LayoutElementBuilders;
+import androidx.wear.protolayout.ModifiersBuilders;
+import androidx.wear.protolayout.TimelineBuilders;
 import androidx.wear.tiles.RequestBuilders;
 import androidx.wear.tiles.TileBuilders;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -215,6 +218,108 @@ public final class AlarmTileServiceTest {
         advance(3_000);
         assertEquals(1, transport.nonces.size());
         assertFalse(WatchAlarmStore.isRefreshing());
+    }
+
+    @Test public void colouredTileHasFiniteValidityAndAnAlwaysAvailableNeutralFallback() throws Exception {
+        long before = System.currentTimeMillis();
+        ListenableFuture<TileBuilders.Tile> result = request(); idle(); reply(0, 0); advance(100);
+        TileBuilders.Tile tile = result.get();
+        List<TimelineBuilders.TimelineEntry> entries = tile.getTileTimeline().getTimelineEntries();
+        assertEquals(2, entries.size());
+        TimelineBuilders.TimeInterval validity = entries.get(0).getValidity();
+        assertNotNull(validity);
+        assertTrue(validity.getStartMillis() >= before);
+        assertTrue(validity.getStartMillis() <= System.currentTimeMillis());
+        assertEquals(WatchAlarmStore.remainingActionValidityMillis(service), validity.getEndMillis() - validity.getStartMillis());
+        assertTrue(validity.getEndMillis() > validity.getStartMillis());
+        assertTrue(validity.getEndMillis() - validity.getStartMillis() <= AlarmStateProtocol.LINK_FRESH_MS);
+        ActionBuilders.AndroidActivity action = launch(entries.get(0));
+        assertEquals(AlarmAction.ARM_STAY.name(), ((ActionBuilders.AndroidStringExtra) action.getKeyToExtraMapping()
+                .get(AlarmTileService.EXTRA_TILE_ACTION)).getValue());
+        String token = ((ActionBuilders.AndroidStringExtra) action.getKeyToExtraMapping()
+                .get(AlarmTileService.EXTRA_TILE_REVISION)).getValue();
+        assertRefreshFallback(entries.get(1));
+        assertTrue(text(entries.get(1).getLayout().getRoot()).contains("Status unknown"));
+        advance(60_000);
+        assertNull("A cached coloured entry cannot execute after monotonic expiry, even if rendering is delayed",
+                WatchAlarmStore.consume(service, token, AlarmAction.ARM_STAY));
+        assertNull(ReflectionHelpers.getStaticField(WatchAlarmStore.class, "activeSelection"));
+    }
+
+    @Test public void timelineUsesEarlierTokenOrPhoneContactExpiry() throws Exception {
+        request(); idle(); reply(0, 0); advance(30_000);
+        WatchAlarmStore.refresh(service); idle(); reply(1, 30_000);
+        TileBuilders.Tile renewedContact = request().get();
+        TimelineBuilders.TimeInterval first = renewedContact.getTileTimeline().getTimelineEntries().get(0).getValidity();
+        assertEquals("A fresh phone reply must not extend the old tile action token", 30_000,
+                first.getEndMillis() - first.getStartMillis());
+        advance(31_000);
+        TileBuilders.Tile renewedToken = request().get();
+        TimelineBuilders.TimeInterval second = renewedToken.getTileTimeline().getTimelineEntries().get(0).getValidity();
+        assertEquals("A new display token must not extend the existing phone-contact lifetime", 29_000,
+                second.getEndMillis() - second.getStartMillis());
+        assertRefreshFallback(renewedToken.getTileTimeline().getTimelineEntries().get(1));
+    }
+
+    @Test public void almostExpiredAdtReportShortensTheColouredTimeline() throws Exception {
+        ListenableFuture<TileBuilders.Tile> result = request(); idle();
+        reply(0, AlarmStateProtocol.MAX_STATE_AGE_MS - 5_000); advance(100);
+        TimelineBuilders.TimeInterval validity = result.get().getTileTimeline().getTimelineEntries().get(0).getValidity();
+        assertEquals(4_900, validity.getEndMillis() - validity.getStartMillis());
+        assertRefreshFallback(result.get().getTileTimeline().getTimelineEntries().get(1));
+    }
+
+    @Test public void checkingSnapshotExpiresToUnconfirmedResultWithoutOfferingAnAction() throws Exception {
+        service.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE).edit()
+                .putBoolean("busy", true).putBoolean("awaiting", true).commit();
+        ListenableFuture<TileBuilders.Tile> result = request(); idle(); advance(8_000);
+        List<TimelineBuilders.TimelineEntry> entries = result.get().getTileTimeline().getTimelineEntries();
+        assertEquals(2, entries.size());
+        TimelineBuilders.TimeInterval validity = entries.get(0).getValidity();
+        assertEquals(30_000, validity.getEndMillis() - validity.getStartMillis());
+        assertRefreshOnly(entries.get(0));
+        assertRefreshFallback(entries.get(1));
+        String fallback = text(entries.get(1).getLayout().getRoot());
+        assertTrue(fallback.contains("Result unconfirmed"));
+        assertTrue(fallback.contains("Check ADT on your phone"));
+        assertEquals(0, WatchAlarmStore.remainingActionValidityMillis(service));
+        assertTrue(service.getSharedPreferences(WatchAlarmStore.PREFERENCES, Context.MODE_PRIVATE).getBoolean("busy", false));
+    }
+
+    private void assertRefreshFallback(TimelineBuilders.TimelineEntry entry) {
+        assertNull("The neutral default also covers times before the finite entry after a clock change", entry.getValidity());
+        assertRefreshOnly(entry);
+    }
+
+    private void assertRefreshOnly(TimelineBuilders.TimelineEntry entry) {
+        ActionBuilders.AndroidActivity activity = launch(entry);
+        assertEquals(1, activity.getKeyToExtraMapping().size());
+        assertEquals(AlarmTileService.ACTION_REFRESH, ((ActionBuilders.AndroidStringExtra)
+                activity.getKeyToExtraMapping().get(AlarmTileService.EXTRA_TILE_ACTION)).getValue());
+        assertFalse(activity.getKeyToExtraMapping().containsKey(AlarmTileService.EXTRA_TILE_REVISION));
+        assertTrue(text(entry.getLayout().getRoot()).contains("Refresh"));
+    }
+
+    private ActionBuilders.AndroidActivity launch(TimelineBuilders.TimelineEntry entry) {
+        ModifiersBuilders.Clickable clickable = findClickable(entry.getLayout().getRoot());
+        assertNotNull(clickable);
+        assertTrue(clickable.getOnClick() instanceof ActionBuilders.LaunchAction);
+        return ((ActionBuilders.LaunchAction) clickable.getOnClick()).getAndroidActivity();
+    }
+
+    private ModifiersBuilders.Clickable findClickable(LayoutElementBuilders.LayoutElement element) {
+        List<LayoutElementBuilders.LayoutElement> children = Collections.emptyList();
+        if (element instanceof LayoutElementBuilders.Box) {
+            LayoutElementBuilders.Box box = (LayoutElementBuilders.Box) element;
+            if (box.getModifiers() != null && box.getModifiers().getClickable() != null) return box.getModifiers().getClickable();
+            children = box.getContents();
+        } else if (element instanceof LayoutElementBuilders.Column) children = ((LayoutElementBuilders.Column) element).getContents();
+        else if (element instanceof LayoutElementBuilders.Row) children = ((LayoutElementBuilders.Row) element).getContents();
+        for (LayoutElementBuilders.LayoutElement child : children) {
+            ModifiersBuilders.Clickable found = findClickable(child);
+            if (found != null) return found;
+        }
+        return null;
     }
 
     private String tileText(TileBuilders.Tile tile) {

@@ -76,10 +76,33 @@ freshness. A reachable phone with a disconnected notification listener is
 therefore distinguishable from a phone that did not answer. Neither contact
 alone nor an unsolicited update clears a pending alarm action.
 
-Before native execution, the phone consumes the displayed state revision and
-records a pending result. A newer ADT state report is required to clear it.
+Immediately before native execution, after final widget validation, the phone
+consumes the displayed state revision and durably records a pending request id.
+A newer ADT state report is required to clear it, including a same-state report.
+The correlated completion id lets the watch distinguish that result from an
+unchanged cache. A native listener returning false or throwing still counts as
+an attempted handoff; only a definitely unattempted command is rejected. Early
+state-bound refusals are source/request/action matched and cannot authorize a
+commit. The watch durably marks a possible COMMIT before sending it, so a crash
+before that point does not invent a pending alarm command.
 Neither a successful message send nor a widget invocation invents the opposite
 alarm state. Refresh asks for the phone's accepted report without an alarm action.
+
+After 30 seconds without confirmation, pending state becomes UNCONFIRMED rather
+than displaying indefinite progress. The pending latch remains durable. Explicit
+phone-only recovery can instead record the owner's checked state, with separate
+PHONE_CHECK evidence and a five-minute lifetime. It requires an unlocked visible
+phone and explicit confirmation, never sends an alarm command, and does not
+cancel ADT's queued work. Later real ADT notifications replace that observation.
+Report format v2 carries completion identity and evidence; v1 remains readable
+by the new watch. Update the watch before the phone.
+
+Tiles contain a finite current entry plus a timeless grey Refresh fallback.
+Coloured validity is bounded by the remaining report, phone-contact and token
+lifetimes; transient progress gets at most 30 seconds. The renderer may delay
+switching entries, so command admission continues to use monotonic time and boot
+identity. Refreshing still cannot detect a physical change whose ADT notification
+never arrives; timestamps describe the last observation, not a live panel query.
 
 ## Verification boundaries
 

@@ -236,10 +236,35 @@ public final class WidgetHostSessionTest {
             assertFalse(session.activateOnce(generation));
             throw new IllegalStateException("inert test listener failure");
         });
-        assertFalse(session.activateOnce(generation));
+        assertEquals(WidgetHostSession.Activation.ATTEMPTED, session.activateOnce(generation, () -> true));
         assertEquals("The listener must actually be reached before testing consumption", 1, entered[0]);
         assertFalse(session.isReady());
         assertFalse(session.activateOnce(generation));
+        assertEquals(0, received);
+    }
+
+    @Test public void finalValidationRunsBeforeTheDurableCommandCallback() {
+        long generation = session.renderGeneration();
+        int[] prepared = {0};
+        valid = false;
+        assertEquals(WidgetHostSession.Activation.NOT_ATTEMPTED,
+            session.activateOnce(generation, () -> { prepared[0]++; return true; }));
+        assertEquals("A rejected host must never record a pending command", 0, prepared[0]);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(0, received);
+    }
+
+    @Test public void declinedDurableCommandCallbackCannotClickOrReenter() {
+        long generation = session.renderGeneration();
+        int[] prepared = {0};
+        assertEquals(WidgetHostSession.Activation.NOT_ATTEMPTED, session.activateOnce(generation, () -> {
+            prepared[0]++;
+            assertFalse("The callback cannot reenter the same one-shot", session.activateOnce(generation));
+            return false;
+        }));
+        assertEquals(1, prepared[0]);
+        assertFalse(session.activateOnce(generation));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals(0, received);
     }
 

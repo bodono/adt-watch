@@ -205,13 +205,87 @@ public final class ArmExperimentProtocolTest {
         check(!first.requestId().equals(second.requestId()), "Production attempts get different random UUIDs");
     }
 
+    private static void checkDeclined(AlarmAction action) {
+        AlarmAction other = action == AlarmAction.ARM_STAY ? AlarmAction.DISARM : AlarmAction.ARM_STAY;
+        byte[] refusal = new AlarmStateProtocol.Declined(action, REQUEST,
+            AlarmStateProtocol.DeclineReason.STATE_CHANGED).encode();
+        ArmExperimentProtocol.Attempt attempt = new ArmExperimentProtocol.Attempt(action, REQUEST, START);
+        check(!attempt.acceptDeclined(refusal, NODE, START), "An unselected attempt cannot accept a refusal");
+        check(attempt.selectTarget(NODE, START + 1), "The refusal fixture selects its phone");
+        check(!attempt.acceptDeclined(refusal, NODE, START + 1), "A refusal before PREPARE is ignored");
+        check(attempt.phase() == ArmExperimentProtocol.Phase.DISCOVERING && attempt.outcome() == null,
+            "A premature refusal cannot change the attempt phase or outcome");
+        check(attempt.prepare(START + 2) != null, "A refusal requires one emitted PREPARE");
+        check(!attempt.acceptDeclined(refusal, "other-phone", START + 3), "Wrong-source refusal is ignored");
+        check(!attempt.acceptDeclined(refusal, null, START + 3), "A refusal without a source is ignored");
+        check(!attempt.acceptDeclined(new AlarmStateProtocol.Declined(other, REQUEST,
+            AlarmStateProtocol.DeclineReason.STATE_CHANGED).encode(), NODE, START + 3),
+            "A refusal for the other action is ignored");
+        check(!attempt.acceptDeclined(new AlarmStateProtocol.Declined(action, OTHER_REQUEST,
+            AlarmStateProtocol.DeclineReason.STATE_CHANGED).encode(), NODE, START + 3),
+            "A refusal for another request is ignored");
+        check(!attempt.acceptDeclined(ArmExperimentProtocol.encodePrepare(action, REQUEST), NODE, START + 3),
+            "A PREPARE cannot impersonate a refusal");
+        check(!attempt.acceptDeclined(null, NODE, START + 3), "A null refusal is ignored");
+        check(attempt.phase() == ArmExperimentProtocol.Phase.AWAITING_CHALLENGE && attempt.outcome() == null,
+            "Invalid refusals leave the pending request unchanged");
+        check(!attempt.canConfirm(START + 3) && attempt.commit(START + 3) == null,
+            "No refusal or invalid message can authorize a COMMIT");
+        check(attempt.acceptDeclined(refusal, NODE, START + ArmExperimentProtocol.READINESS_TIMEOUT_MS - 1),
+            "A matched refusal is accepted up to the readiness deadline");
+        check(attempt.phase() == ArmExperimentProtocol.Phase.FINISHED
+            && attempt.outcome() == ArmExperimentProtocol.Outcome.REJECTED && attempt.challengeId() == null,
+            "Early refusal finishes rejected without creating a challenge");
+        check(!attempt.canConfirm(START + 10_000) && attempt.commit(START + 10_000) == null
+            && attempt.prepare(START + 10_000) == null, "Refusal cannot authorize a commit or another prepare");
+        check(!attempt.acceptChallenge(ArmExperimentProtocol.encodeChallenge(action, REQUEST, CHALLENGE), NODE,
+            START + 10_000), "A later challenge cannot revive a refused attempt");
+        check(!attempt.acceptDeclined(refusal, NODE, START + 10_000), "Refusal cannot replay");
+        check(!attempt.acceptResult(ArmExperimentProtocol.encodeResult(action, REQUEST, CHALLENGE,
+            ArmExperimentProtocol.Outcome.REQUESTED), NODE, START + 10_000),
+            "A late result cannot turn early refusal into an attempted command");
+
+        for (AlarmStateProtocol.DeclineReason reason : AlarmStateProtocol.DeclineReason.values()) {
+            attempt = awaiting(action);
+            check(attempt.acceptDeclined(new AlarmStateProtocol.Declined(action, REQUEST, reason).encode(), NODE,
+                START + 3), "Every recognized matched refusal reason can end readiness");
+            check(attempt.commit(START + 4) == null, "No refusal reason permits a COMMIT");
+        }
+
+        attempt = awaiting(action);
+        check(!attempt.acceptDeclined(refusal, NODE, START + ArmExperimentProtocol.READINESS_TIMEOUT_MS),
+            "A refusal exactly at the readiness deadline is rejected");
+        check(attempt.phase() == ArmExperimentProtocol.Phase.EXPIRED && attempt.outcome() == null,
+            "An expired request cannot acquire a late rejection outcome");
+        attempt = awaiting(action);
+        check(!attempt.acceptDeclined(refusal, NODE, START + 1), "A backward clock expires the refusal's attempt");
+        check(attempt.phase() == ArmExperimentProtocol.Phase.EXPIRED, "Clock expiry remains terminal");
+        attempt = awaiting(action); attempt.cancel();
+        check(!attempt.acceptDeclined(refusal, NODE, START + 3)
+            && attempt.phase() == ArmExperimentProtocol.Phase.CANCELLED && attempt.outcome() == null,
+            "A canceled request cannot accept a refusal");
+
+        attempt = ready(action, 5);
+        check(!attempt.acceptDeclined(refusal, NODE, START + 6),
+            "A challenge-free refusal cannot terminate an already-issued challenge");
+        check(attempt.phase() == ArmExperimentProtocol.Phase.CONFIRMABLE && attempt.canConfirm(START + 6),
+            "Only the established challenge remains confirmable");
+        check(attempt.commit(START + 7) != null, "The original challenge still permits its one explicit commit");
+        check(!attempt.acceptDeclined(refusal, NODE, START + 8)
+            && attempt.phase() == ArmExperimentProtocol.Phase.AWAITING_RESULT && attempt.outcome() == null,
+            "An early-refusal replay cannot classify a committed action as definitely unsent");
+        check(attempt.acceptResult(ArmExperimentProtocol.encodeResult(action, REQUEST, CHALLENGE,
+            ArmExperimentProtocol.Outcome.REQUESTED), NODE, START + 9),
+            "The committed request still accepts only its matched challenged result");
+    }
+
     public static void main(String[] ignored) {
         checks = 0;
         check("Arm Stay".equals(AlarmAction.ARM_STAY.label()), "Arm Stay label is explicit");
         check("Disarm".equals(AlarmAction.DISARM.label()), "Disarm label is explicit");
         check("WATCH ARM STAY".equals(AlarmAction.ARM_STAY.widgetLabel()), "Arm widget label is exact");
         check("WATCH DISARM".equals(AlarmAction.DISARM.widgetLabel()), "Disarm widget label is exact");
-        for (AlarmAction action : AlarmAction.values()) checkAction(action);
+        for (AlarmAction action : AlarmAction.values()) { checkAction(action); checkDeclined(action); }
         System.out.println("Alarm experiment protocol: " + checks + " checks passed.");
     }
 }

@@ -102,6 +102,9 @@ public final class WatchActivity extends Activity {
         selection = chosen; commandSent = false;
         ArmExperimentProtocol.Attempt started = new ArmExperimentProtocol.Attempt(action, SystemClock.elapsedRealtime());
         attempt = started;
+        if (!WatchAlarmStore.attachRequest(this, chosen, started.requestId())) {
+            endAttempt("Request could not be saved. No action sent.", false); return;
+        }
         if (!started.selectTarget(chosen.phone, SystemClock.elapsedRealtime()) || started.prepare(SystemClock.elapsedRealtime()) == null) {
             endAttempt("Request expired. Tap Refresh.", false); return;
         }
@@ -116,12 +119,18 @@ public final class WatchActivity extends Activity {
         ArmExperimentProtocol.Attempt started = attempt;
         if (!current(started) || selection == null) return;
         long now = SystemClock.elapsedRealtime();
-        if (ArmExperimentProtocol.CHALLENGE_PATH.equals(event.getPath())
+        if (AlarmStateProtocol.DECLINED_PATH.equals(event.getPath()) && !commandSent
+                && started.acceptDeclined(event.getData(), event.getSourceNodeId(), now)) {
+            endAttempt("Not sent: phone status changed or control unavailable.", false);
+        } else if (ArmExperimentProtocol.CHALLENGE_PATH.equals(event.getPath())
                 && started.acceptChallenge(event.getData(), event.getSourceNodeId(), now)) {
             if (!WatchAlarmStore.stillCurrent(this, selection)) { endAttempt("Status changed. No action sent.", false); return; }
             // The single user tap already authorized this exact action; there is no confirmation UI.
             byte[] commit = started.commit(now);
             if (commit == null) { endAttempt("Request expired. Tap Refresh.", false); return; }
+            if (!WatchAlarmStore.markCommitting(this, selection, started.requestId())) {
+                endAttempt("Request could not be saved. No action sent.", false); return;
+            }
             commandSent = true;
             send(selection.phone, ArmExperimentProtocol.COMMIT_PATH, commit,
                 () -> { if (attempt == started) endAttempt("Check ADT for the result.", true); });

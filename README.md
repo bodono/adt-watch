@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app already installed on a paired Android phone.
 It is not affiliated with or supported by ADT.
 
-v0.20 provides one large alarm button and a swipeable **ADT Watch** tile:
+v0.21 provides one large alarm button and a swipeable **ADT Watch** tile:
 
 | Colour | Latest ADT report | One tap requests |
 | --- | --- | --- |
@@ -21,11 +21,22 @@ into ADT. Set the **ADT app's battery usage to Unrestricted** so Android allows
 its queued work to run. Installation uses a computer; everyday use needs no
 computer or USB cable.
 
-The colour comes from ADT's latest accepted alarm-state notification, with its
-age shown on the watch. It is not a continuous live reading. Sending a request
+The colour normally comes from ADT's latest accepted alarm-state notification,
+with the report's date and time shown on the watch. It is not a continuous live reading. Sending a request
 does not change the colour; the app waits for a new ADT report. **Refresh** asks
 the phone for status without operating the alarm. If the result stays grey,
 check ADT before another request: queued ADT work can execute later.
+
+v0.21 expires cached Tile controls into a grey fallback and shows **Result
+unconfirmed** after 30 seconds without confirmation. A rejected request ends
+promptly; a newer same-state notification can also resolve a request. None of
+these paths repeats the alarm command.
+
+If ADT misses a notification, Refresh cannot retrieve a live panel reading.
+On the phone, **Recover missing status…** lets you record the state you have
+just checked in ADT, after checking that previous requests have settled. This
+sends no alarm command. The watch labels it **Checked**; that observation is
+usable for five minutes and is replaced by a newer ADT report.
 
 Opening the app or loading a stale Tile automatically checks status; a separate
 Refresh tap normally isn't needed. The Tile returns the phone's reply in its
@@ -33,8 +44,9 @@ original load, rather than publishing a loading screen that Wear OS can retain
 while delaying a second update. Accepted ADT change notifications prompt a faster status
 check. Wear OS schedules Tile updates, so an immediate refresh on every swipe
 is not guaranteed. Failed or incomplete checks are retried for up to 30 seconds;
-alarm commands are never retried. A missing ADT report keeps controls grey, even
-if the phone itself is reachable.
+alarm commands are never retried. An unresolved result keeps controls grey, even
+if the phone itself is reachable. Wear OS may delay the visual expiry; stale
+button taps still undergo independent checks before any command can be sent.
 
 ## Setup and recovery
 

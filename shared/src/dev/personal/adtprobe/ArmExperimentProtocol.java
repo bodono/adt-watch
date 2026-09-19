@@ -191,6 +191,15 @@ public final class ArmExperimentProtocol {
             return true;
         }
 
+        public synchronized boolean acceptDeclined(byte[] payload, String source, long now) {
+            if (!isActive(now) || phase != Phase.AWAITING_CHALLENGE || !target.equals(source)) return false;
+            AlarmStateProtocol.Declined refusal = AlarmStateProtocol.parseDeclined(payload);
+            if (refusal == null || refusal.action != action || !request.equals(refusal.request)) return false;
+            outcome = Outcome.REJECTED;
+            phase = Phase.FINISHED;
+            return true;
+        }
+
         public synchronized boolean canConfirm(long now) {
             return isActive(now) && phase == Phase.CONFIRMABLE;
         }
