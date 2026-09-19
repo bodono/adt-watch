@@ -131,6 +131,7 @@ public final class AdtPortalSetupActivity extends Activity {
 
     private void beginCheck() {
         if (!interactive() || inFlight != null) return;
+        session = AdtPortalSession.session(this); // Re-detect which host now holds the sign-in.
         candidate = null; queryStarted = SystemClock.elapsedRealtime(); deadline = queryStarted + QUERY_MS;
         final int ticket = ++generation;
         final long queryDeadline = deadline;
@@ -169,9 +170,11 @@ public final class AdtPortalSetupActivity extends Activity {
                 && AlarmStateProtocol.action(result.state) != null && AdtPortalSession.validId(result.systemId)
                 && AdtPortalSession.validId(result.partitionId)) {
             candidate = result; candidateStarted = queryStarted;
+            AdtPortalSession.recordVerifiedOrigin(this, session.origin());
             status.setText("ADT reports " + stateLabel(result.state) + ".\nSystem: " + display(result.systemLabel, result.systemId)
                 + "\nPartition: " + display(result.partitionLabel, result.partitionId)
                 + String.format(Locale.UK, "\nQuery: %.1f seconds.", Math.max(0, result.elapsedMillis) / 1000.0)
+                + "\nSession host: " + URI.create(session.origin()).getHost()
                 + "\nBefore choosing, check that this is the same home as your configured Arm Stay and Disarm scenes.");
         } else status.setText(failureMessage(result == null ? null : result.status)
             + (result == null ? "" : "\nCheck code: " + result.diagnosticCode()));
@@ -235,11 +238,17 @@ public final class AdtPortalSetupActivity extends Activity {
         try {
             URI uri = URI.create(url);
             String host = uri.getHost();
+            // The sign-in flow may pass through other ADT or Alarm.com hosts (identity, verification);
+            // anything outside those two domains is still blocked.
             return "https".equalsIgnoreCase(uri.getScheme()) && uri.getRawUserInfo() == null
                 && (uri.getPort() == -1 || uri.getPort() == 443) && host != null
-                && ("smartservices.adt.co.uk".equalsIgnoreCase(host) || "www.alarm.com".equalsIgnoreCase(host)
-                    || "alarm.com".equalsIgnoreCase(host));
+                && (underDomain(host, "adt.co.uk") || underDomain(host, "alarm.com"));
         } catch (IllegalArgumentException ignored) { return false; }
+    }
+
+    private static boolean underDomain(String host, String domain) {
+        String lower = host.toLowerCase(Locale.ROOT);
+        return lower.equals(domain) || lower.endsWith("." + domain);
     }
 
     private final class PortalNavigation extends WebViewClient {
