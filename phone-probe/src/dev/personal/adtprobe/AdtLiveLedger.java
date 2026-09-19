@@ -35,6 +35,11 @@ public final class AdtLiveLedger {
         public final String revision, observationId, requestId, completedRequest;
         public final long observationAgeMillis, requestStartedElapsed;
         public final boolean fresh, providerBusy, pending, enabled;
+        /**
+         * No request outcome hangs on the next read: there is no request, it was confirmed, or this
+         * observation began after the unconfirmed request's window closed (or in a later boot).
+         */
+        public final boolean settled;
         public final Outcome outcome;
         public final AlarmAction action;
 
@@ -48,6 +53,9 @@ public final class AdtLiveLedger {
             outcome = ledger.outcome; pending = outcome == Outcome.PENDING;
             requestId = ledger.requestId; completedRequest = ledger.completedRequest;
             requestStartedElapsed = ledger.requestStartedElapsed;
+            settled = outcome == Outcome.NONE || outcome == Outcome.CONFIRMED
+                || outcome == Outcome.UNCONFIRMED && ledger.hasObservation && (ledger.observationBoot != ledger.requestBoot
+                    || ledger.queryStartedElapsed >= ledger.requestStartedElapsed + PENDING_LIMIT_MS);
             availability = !ledger.hasObservation ? AlarmStateProtocol.Availability.NO_STATE
                 : !fresh ? AlarmStateProtocol.Availability.STALE
                 : providerBusy || pending ? AlarmStateProtocol.Availability.BUSY

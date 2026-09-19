@@ -232,7 +232,9 @@ public final class ArmExperimentService extends Service {
         if (toggleRevision != null) {
             PhoneAlarmState.Snapshot state = PhoneAlarmState.snapshot(app);
             AlarmStateProtocol.DeclineReason reason = null;
-            if (state.availability != AlarmStateProtocol.Availability.READY)
+            // A still-fresh observation is enough to colour the watch but not to click ADT's
+            // scene: the most recent read must itself have succeeded.
+            if (state.readFailed || state.availability != AlarmStateProtocol.Availability.READY)
                 reason = AlarmStateProtocol.DeclineReason.UNAVAILABLE;
             else if (message.action == AlarmAction.DISARM && state.state == AlarmStateProtocol.State.DISARMED
                     || message.action == AlarmAction.ARM_STAY && state.state == AlarmStateProtocol.State.ARMED_STAY)

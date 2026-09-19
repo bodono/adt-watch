@@ -97,7 +97,10 @@ younger than three seconds that began after dispatch, and tells the watch only
 when something changed; a caller that merely waited for another read in
 progress is answered from the ledger rather than recorded as a failure. A tap's
 preflight never reuses an earlier read; when its own read cannot complete, that
-tap is declined and the display keeps the earlier observation.
+tap is declined and the display keeps the earlier observation. A read that
+fails for a transient reason keeps reporting a still-fresh observation while no
+request outcome depends on it; an observation made inside a request's window is
+never re-reported as that request's settled result.
 Provider busy responses remain transient. Request progress ends after 30
 seconds; missing confirmation becomes `UNCONFIRMED`, not an indefinite wait for
 a notification. Fresh steady ADT state remains authoritative and can restore
