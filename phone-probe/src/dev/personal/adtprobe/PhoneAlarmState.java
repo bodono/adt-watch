@@ -21,6 +21,9 @@ final class PhoneAlarmState {
     static final String ADT_PACKAGE = "com.adtuk.adtukalarm";
     static final String PREFERENCES = "live_adt_state";
     static final long COMMAND_CONFIRMATION_MILLIS = AdtLiveLedger.PENDING_LIMIT_MS;
+    /** How long one two-read membership proof (queryBound) covers partition-only routine reads. */
+    static final long MEMBERSHIP_PROOF_MS = 6 * 60 * 60 * 1000L;
+    private static final String MEMBERSHIP = "adt_portal_membership";
     private static final long QUERY_MS = 8_000;
     private static final ReentrantLock QUERY_LOCK = new ReentrantLock();
     private static final ScheduledExecutorService READS = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -191,12 +194,33 @@ final class PhoneAlarmState {
             if (remaining <= 0) return null;
             AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
             if (binding == null) return null;
-            return new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS))
-                .queryBound(binding.systemId, binding.partitionId, deadline);
+            AdtPortalClient client = new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS));
+            // Prove membership in the saved system once per boot and at most every six hours;
+            // every other routine check reads only the bound partition (one round trip, not two).
+            if (!membershipProven(context, binding)) {
+                AdtPortalClient.Result proof = client.queryBound(binding.systemId, binding.partitionId, deadline);
+                if (proof.status == AdtPortalClient.Status.READY || proof.status == AdtPortalClient.Status.BUSY)
+                    recordMembership(context, binding);
+                return proof;
+            }
+            return client.status(binding.systemId, binding.partitionId, deadline);
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }
         finally { session.cancel(false); }
     }
+    static boolean membershipProven(Context context, AdtPortalSession.Binding binding) {
+        SharedPreferences stored = context.getApplicationContext().getSharedPreferences(MEMBERSHIP, Context.MODE_PRIVATE);
+        long at = stored.getLong("provenElapsed", -1), now = SystemClock.elapsedRealtime();
+        return binding != null && binding.id.equals(stored.getString("bindingId", "")) && stored.getInt("boot", -1) == boot(context)
+            && at >= 0 && now >= at && now - at < MEMBERSHIP_PROOF_MS;
+    }
+
+    static void recordMembership(Context context, AdtPortalSession.Binding binding) {
+        context.getApplicationContext().getSharedPreferences(MEMBERSHIP, Context.MODE_PRIVATE).edit().clear()
+            .putString("bindingId", binding.id).putInt("boot", boot(context))
+            .putLong("provenElapsed", SystemClock.elapsedRealtime()).commit();
+    }
+
     private static synchronized void failed(Context context, AdtPortalSession.Binding binding, AdtPortalClient.Status status) {
         if (!AdtPortalSession.valid(context, binding)) return;
         SharedPreferences stored = preferences(context);
