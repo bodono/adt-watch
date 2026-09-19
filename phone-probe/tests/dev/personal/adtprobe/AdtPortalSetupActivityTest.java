@@ -81,6 +81,7 @@ public final class AdtPortalSetupActivityTest {
         String text = screenText();
         assertTrue(text.contains("Disarmed")); assertTrue(text.contains("Inert home"));
         assertTrue(text.contains("Inert partition")); assertTrue(text.contains("0.3 seconds"));
+        assertTrue("The screen names the host that holds the sign-in", text.contains("Session host: www.alarm.com"));
         assertEquals(alarm, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getAll());
         Map<String, ?> diagnostic = context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).getAll();
         assertEquals(Set.of("code", "status", "elapsedMillis"), diagnostic.keySet());
@@ -261,7 +262,8 @@ public final class AdtPortalSetupActivityTest {
 
     @Test public void navigationIsExactHttpsAndWebViewCannotAccessLocalFiles() {
         for (String allowed : new String[]{"https://smartservices.adt.co.uk/", "https://www.alarm.com/login.aspx",
-                "https://alarm.com/", "https://www.alarm.com:443/web/"}) assertTrue(AdtPortalSetupActivity.allowedNavigation(allowed));
+                "https://alarm.com/", "https://www.alarm.com:443/web/", "https://login.alarm.com/mfa",
+                "https://identity.adt.co.uk/auth?x=1", "https://ADT.CO.UK/"}) assertTrue(allowed, AdtPortalSetupActivity.allowedNavigation(allowed));
         for (String denied : new String[]{null, "http://www.alarm.com/", "https://www.alarm.com.evil.test/",
                 "https://evil.test/?next=https://www.alarm.com", "https://user@www.alarm.com/",
                 "https://www.alarm.com:8443/", "file:///sdcard/file", "content://file", "javascript:alert(1)",

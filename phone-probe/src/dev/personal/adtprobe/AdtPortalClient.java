@@ -13,6 +13,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +28,8 @@ import org.json.JSONTokener;
 /** Read-only use of Alarm.com's unofficial customer-portal JSON API. Never sends an alarm command. */
 final class AdtPortalClient {
     static final String ORIGIN = "https://www.alarm.com";
+    /** Origins a portal session may live on: Alarm.com itself or ADT UK's branded portal host. */
+    static final List<String> ORIGINS = Collections.unmodifiableList(Arrays.asList(ORIGIN, "https://smartservices.adt.co.uk"));
     static final int MAX_BODY_BYTES = 256 * 1024;
     // Identity responses also embed portal configuration and included relationship resources.
     static final int MAX_IDENTITY_BODY_BYTES = 4 * 1024 * 1024;
@@ -39,6 +42,8 @@ final class AdtPortalClient {
         void storeCookie(String setCookie);
         default void storeCookie(String responseUrl, String setCookie) { storeCookie(setCookie); }
         default void persist() { }
+        /** The https origin whose cookie jar holds the sign-in; API paths are appended to it. */
+        default String origin() { return ORIGIN; }
     }
     enum Status { READY, BUSY, LOGIN_REQUIRED, VERIFY_LOGIN, UNAVAILABLE, UNSUPPORTED, AMBIGUOUS }
     enum Stage { SESSION, IDENTITIES, SYSTEM, PARTITION }
@@ -84,9 +89,9 @@ final class AdtPortalClient {
         final String url;
         final int maxBodyBytes;
         final Map<String, String> headers;
-        private Request(String path, Map<String, String> headers) throws Failure {
-            if (!validPath(path)) throw new Failure(Status.UNSUPPORTED);
-            url = ORIGIN + path;
+        private Request(String origin, String path, Map<String, String> headers) throws Failure {
+            if (!ORIGINS.contains(origin) || !validPath(path)) throw new Failure(Status.UNSUPPORTED);
+            url = origin + path;
             maxBodyBytes = bodyLimit(path);
             this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(headers));
         }
@@ -262,7 +267,8 @@ final class AdtPortalClient {
     private JSONObject fetch(String path, long deadline, Stage stage, Diagnostic diagnostic) throws Failure, IOException, JSONException {
         diagnostic.stage = Stage.SESSION; diagnostic.http = 0;
         checkDeadline(deadline);
-        String cookies = session.cookies(ORIGIN + path), userAgent = session.userAgent();
+        String origin = session.origin();
+        String cookies = session.cookies(origin + path), userAgent = session.userAgent();
         if (!headerValue(cookies, 16_384)) throw new Failure(Status.LOGIN_REQUIRED, cookies == null ? Reason.SESSION : Reason.COOKIE_FORMAT);
         if (cookies.isEmpty()) throw new Failure(Status.LOGIN_REQUIRED, Reason.SESSION);
         String ajaxKey = null;
@@ -278,17 +284,17 @@ final class AdtPortalClient {
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Accept", "application/vnd.api+json"); headers.put("Cookie", cookies);
         headers.put("ajaxrequestuniquekey", ajaxKey); headers.put("User-Agent", userAgent);
-        headers.put("Referer", ORIGIN + "/web/system/home");
+        headers.put("Referer", origin + "/web/system/home");
         headers.put("Cache-Control", "no-cache, no-store"); headers.put("Pragma", "no-cache");
         diagnostic.stage = stage;
-        Response response = transport.get(new Request(path, headers), deadline);
+        Response response = transport.get(new Request(origin, path, headers), deadline);
         if (response != null) diagnostic.http = boundedHttp(response.code);
         checkDeadline(deadline);
         if (response == null) throw new Failure(Status.UNAVAILABLE, Reason.EMPTY_RESPONSE);
         if (response.setCookies.size() > 16) throw new Failure(Status.UNAVAILABLE, Reason.COOKIE_FORMAT);
         for (String cookie : response.setCookies) {
             if (!headerValue(cookie, 8192)) throw new Failure(Status.UNAVAILABLE, Reason.COOKIE_FORMAT);
-            session.storeCookie(ORIGIN + path, cookie);
+            session.storeCookie(origin + path, cookie);
         }
         if (response.code == 401 || response.code >= 300 && response.code < 400) throw new Failure(Status.LOGIN_REQUIRED, Reason.HTTP);
         if (response.code == 403 || response.code == 409 || response.code == 423) throw new Failure(Status.VERIFY_LOGIN, Reason.HTTP);
@@ -390,7 +396,7 @@ final class AdtPortalClient {
         HttpTransport(Clock clock, ConnectionFactory connections) { this.clock = clock; this.connections = connections; }
         @Override public Response get(Request request, long deadlineElapsed) throws IOException {
             URL url = new URL(request.url);
-            if (!"https".equals(url.getProtocol()) || !"www.alarm.com".equals(url.getHost()) || url.getPort() != -1
+            if (!"https".equals(url.getProtocol()) || !ORIGINS.contains("https://" + url.getHost()) || url.getPort() != -1
                     || url.getUserInfo() != null || url.getQuery() != null || url.getRef() != null || !validPath(url.getPath()))
                 throw new IOException("Invalid portal path");
             HttpURLConnection connection = connections.open(url);
