@@ -193,8 +193,12 @@ final class PhoneAlarmState {
             if (binding == null) return null;
             // One round trip when the partition names the saved system as its owner; the client
             // itself reads the saved system to prove the binding when it does not.
-            return new AdtPortalClient(session.get(remaining, TimeUnit.MILLISECONDS))
-                .status(binding.systemId, binding.partitionId, deadline);
+            AdtPortalClient.Session portal = session.get(remaining, TimeUnit.MILLISECONDS);
+            AdtPortalClient.Result result = new AdtPortalClient(portal).status(binding.systemId, binding.partitionId, deadline);
+            // The host that answered an authenticated read is the one to try first next time.
+            if (result.status == AdtPortalClient.Status.READY || result.status == AdtPortalClient.Status.BUSY)
+                AdtPortalSession.recordVerifiedOrigin(context, portal.origin());
+            return result;
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }
         finally { session.cancel(false); }

@@ -170,6 +170,7 @@ public final class AdtPortalSetupActivity extends Activity {
                 && AlarmStateProtocol.action(result.state) != null && AdtPortalSession.validId(result.systemId)
                 && AdtPortalSession.validId(result.partitionId)) {
             candidate = result; candidateStarted = queryStarted;
+            AdtPortalSession.recordVerifiedOrigin(this, session.origin());
             status.setText("ADT reports " + stateLabel(result.state) + ".\nSystem: " + display(result.systemLabel, result.systemId)
                 + "\nPartition: " + display(result.partitionLabel, result.partitionId)
                 + String.format(Locale.UK, "\nQuery: %.1f seconds.", Math.max(0, result.elapsedMillis) / 1000.0)

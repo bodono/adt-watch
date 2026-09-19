@@ -10,6 +10,11 @@ import java.util.UUID;
 final class AdtPortalSession {
     static final String COOKIE_ORIGIN = "https://www.alarm.com";
     private static final String PREFERENCES = "adt_portal_binding";
+    private static final String SESSION_PREFERENCES = "adt_portal_session";
+    /** The API URL whose cookie visibility decides where the sign-in lives; fetch uses the same paths. */
+    private static final String API_PROBE = "/web/api/identities";
+    /** Cookie visibility for one exact URL, as CookieManager.getCookie answers it. */
+    interface CookieLookup { String cookie(String url); }
 
     private AdtPortalSession() { }
 
@@ -37,7 +42,7 @@ final class AdtPortalSession {
     static AdtPortalClient.Session session(Context context) {
         CookieManager manager = CookieManager.getInstance();
         String agent = WebSettings.getDefaultUserAgent(context.getApplicationContext());
-        String origin = sessionOrigin(manager);
+        String origin = sessionOrigin(manager::getCookie, verifiedOrigin(context));
         return new AdtPortalClient.Session() {
             private boolean changed;
             @Override public String origin() { return origin; }
@@ -60,12 +65,28 @@ final class AdtPortalSession {
 
     /**
      * ADT UK signs in on its own branded host. Whether that session is then held on alarm.com or on
-     * the ADT host is not known until a real account is tried, so use whichever allowed origin holds
-     * the request-key cookie, preferring alarm.com.
+     * the ADT host is not known until a real account is tried. The jar is consulted at the exact API
+     * URL a read would use, because a session cookie scoped to /web is invisible at the origin root.
+     * A key alone cannot tell which of two retained host sessions is signed in, so the host that
+     * last completed an authenticated read is tried first while it still holds a key; otherwise the
+     * first allowed origin holding one, preferring alarm.com.
      */
-    static String sessionOrigin(CookieManager manager) {
-        for (String origin : AdtPortalClient.ORIGINS) if (hasRequestKey(manager.getCookie(origin))) return origin;
+    static String sessionOrigin(CookieLookup cookies, String verified) {
+        if (verified != null && AdtPortalClient.ORIGINS.contains(verified) && hasRequestKey(cookies.cookie(verified + API_PROBE)))
+            return verified;
+        for (String origin : AdtPortalClient.ORIGINS) if (hasRequestKey(cookies.cookie(origin + API_PROBE))) return origin;
         return COOKIE_ORIGIN;
+    }
+
+    /** The allowed origin that last answered an authenticated read, or null. */
+    static String verifiedOrigin(Context context) {
+        String value = sessionPreferences(context).getString("verifiedOrigin", null);
+        return value != null && AdtPortalClient.ORIGINS.contains(value) ? value : null;
+    }
+
+    static void recordVerifiedOrigin(Context context, String origin) {
+        if (origin != null && AdtPortalClient.ORIGINS.contains(origin))
+            sessionPreferences(context).edit().putString("verifiedOrigin", origin).apply();
     }
 
     static boolean hasRequestKey(String cookies) {
@@ -115,5 +136,8 @@ final class AdtPortalSession {
 
     private static SharedPreferences preferences(Context context) {
         return context.getApplicationContext().getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+    }
+    private static SharedPreferences sessionPreferences(Context context) {
+        return context.getApplicationContext().getSharedPreferences(SESSION_PREFERENCES, Context.MODE_PRIVATE);
     }
 }

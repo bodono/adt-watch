@@ -131,7 +131,7 @@ public final class AdtPortalClientTest {
 
     @Test public void aSessionOnTheAdtPortalHostBuildsItsRequestsThereAndOtherOriginsAreRefused() throws Exception {
         session.origin = "https://smartservices.adt.co.uk";
-        transport.responses.add(json(partition(1, 1)));
+        transport.responses.add(json(owned(partition(1, 1), SYSTEM)));
         assertEquals(AdtPortalClient.Status.READY, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
         assertEquals("https://smartservices.adt.co.uk/web/api/devices/partitions/" + PARTITION, transport.requests.get(0).url);
         assertEquals("https://smartservices.adt.co.uk/web/system/home", transport.requests.get(0).headers.get("Referer"));
