@@ -194,6 +194,26 @@ public final class WatchStatusRecoveryTest {
         assertEquals(3, transport.queries.size());
     }
 
+    @Test public void deadlineWithAnInFlightQueryKeepsTheLastAnswerWhenThePhoneWasReplying() {
+        refresh();
+        for (int i = 0; i < 14; i++) {
+            if (i > 0) advance(2_000);
+            connect(i);
+            assertTrue(answer(i, AlarmStateProtocol.Availability.BUSY, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        }
+        advance(2_000); connect(14);
+        assertEquals(15, transport.queries.size());
+        assertTrue(WatchAlarmStore.isRefreshing());
+        advance(2_000);
+        assertFalse(WatchAlarmStore.isRefreshing());
+        assertFalse(answer(14, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R1, 0));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertEquals("A phone that answered four seconds ago is not reported as unreachable",
+                "Phone reached; waiting for ADT", WatchAlarmStore.read(context).detail);
+        advance(30_000);
+        assertEquals(15, transport.queries.size());
+    }
+
     @Test public void consumingActionCancelsRecoveryUntilFinishWithoutReplayingTheTap() {
         WatchAlarmStore.ViewState armed = seed(AlarmStateProtocol.State.ARMED_STAY);
         advance(2_000); refresh();

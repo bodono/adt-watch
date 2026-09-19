@@ -275,9 +275,18 @@ final class WatchAlarmStore {
         }
         if (expected.finalStarted >= 0 && expected.live(now)) return;
         diagnostic("RECOVERY_EXPIRE");
-        if (pending != null && pending.owner == expected) markTransportFailed(context);
+        // A query still in flight at the deadline is dropped. That is a transport failure only
+        // if the phone never answered during this window; otherwise its last answer (typically
+        // BUSY while waiting for ADT) remains the displayed diagnosis instead of "No phone reply".
+        if (pending != null && pending.owner == expected && !contactedSince(prefs(context), expected.started))
+            markTransportFailed(context);
         cancelRecovery();
         changed(context);
+    }
+
+    private static boolean contactedSince(SharedPreferences p, long started) {
+        long contact = p.getLong("contactReceived", -1);
+        return contact >= 0 && contact >= started;
     }
 
     /** One read after the uncertainty boundary, never a command or an endlessly extended burst. */
