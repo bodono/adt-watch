@@ -163,7 +163,9 @@ public final class WatchActivity extends Activity {
         if (controls == null) return;
         WatchAlarmStore.ViewState state = WatchAlarmStore.read(this);
         displayedToken = state.revision;
-        String detail = notice != null ? notice : feedback == null ? state.detail : feedback;
+        // A decline notice outranks the ordinary detail of a usable control, never a current
+        // problem: while the control is unavailable the store's detail says what to do about it.
+        String detail = notice != null && state.enabled ? notice : feedback == null ? state.detail : feedback;
         if (!watchUnlocked()) detail = "Unlock your watch.";
         controls.render(attempt != null ? "Sending request" : state.label, state.action,
             interactive() && attempt == null && state.enabled, detail);

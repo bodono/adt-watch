@@ -364,6 +364,45 @@ public final class WatchActivityFlowTest {
         assertFalse(controls().alarmButton.getText().toString().contains("Not sent"));
     }
 
+    @Test public void aCurrentProblemOutranksTheDeclineNoticeUntilTheControlIsUsableAgain() {
+        report(AlarmStateProtocol.State.DISARMED);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
+                AlarmAction.ARM_STAY, selected.request, AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode());
+        stopQueryTransport();
+        assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+
+        // The correlated status answer that follows says the phone's ADT sign-in has lapsed.
+        advance(2_001);
+        WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
+        assertNotNull(query);
+        assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
+        assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce,
+            AlarmStateProtocol.State.UNKNOWN, AlarmStateProtocol.Availability.NO_ACCESS, "-", 0), now(), BOOT));
+        SharedPreferences.OnSharedPreferenceChangeListener changed = ReflectionHelpers.getField(activity, "changed");
+        changed.onSharedPreferenceChanged(stored(), "contactReceived");
+        stopQueryTransport();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        render();
+        assertFalse(controls().alarmButton.isEnabled());
+        String text = controls().alarmButton.getText().toString();
+        assertTrue("The newer recovery instruction shows", text.contains("Sign in to ADT"));
+        assertFalse("The historical notice does not hide it", text.contains("Not sent"));
+
+        // Once the control is usable again, the tap that was never sent is still worth knowing about.
+        advance(2_001);
+        report(AlarmStateProtocol.State.DISARMED);
+        changed.onSharedPreferenceChanged(stored(), "contactReceived");
+        stopQueryTransport();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        render();
+        assertTrue(controls().alarmButton.isEnabled());
+        assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+        assertEquals(1, sent.size());
+    }
+
     @Test public void wrongSourceRequestOrActionRefusalCannotCancelTheActiveTap() {
         report(AlarmStateProtocol.State.ARMED_STAY);
         mount(new Intent(Intent.ACTION_MAIN), null, true);
