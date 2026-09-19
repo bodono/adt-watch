@@ -247,8 +247,21 @@ public final class ToggleServiceTest {
         noStart();
         assertEquals(1, declines.size());
         assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
-        assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertTrue("The failed preflight read is what blocks the command", PhoneAlarmState.snapshot(context).readFailed);
+        assertEquals("The earlier fresh observation still colours the watch", AlarmStateProtocol.Availability.READY,
+            PhoneAlarmState.snapshot(context).availability);
         assertEquals(0, clicks);
+    }
+
+    @Test public void transientReadFailureAfterThePreflightDoesNotCancelTheSession() {
+        create(queue());
+        queryResult = new AdtPortalClient.Result(AdtPortalClient.Status.UNAVAILABLE,
+            AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 10);
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1));
+        PhoneAlarmState.refresh(context, 0); // A notification hint whose read timed out.
+        assertTrue(PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
+        assertEquals(Boolean.TRUE, ReflectionHelpers.callInstanceMethod(service, "live"));
+        assertEquals(Boolean.FALSE, member(service, "stopped"));
     }
 
     @Test public void revokingWatchSetupDuringTheReadPreventsNativeReadiness() {

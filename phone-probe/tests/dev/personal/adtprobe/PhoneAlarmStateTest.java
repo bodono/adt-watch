@@ -57,15 +57,51 @@ public final class PhoneAlarmStateTest {
         advance(60_000); assertEquals(AlarmStateProtocol.Availability.STALE, PhoneAlarmState.snapshot(context).availability);
         assertFalse(PhoneAlarmState.matches(context, first.revision, AlarmAction.ARM_STAY));
     }
-    @Test public void failedReadImmediatelyGatesEarlierFreshObservation() {
+    @Test public void loginFailureGatesButATransientReadFailureKeepsAFreshObservation() {
         bind(); PhoneAlarmState.Snapshot first = read();
+        assertFalse(first.readFailed);
         answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED); read();
         assertEquals(AlarmStateProtocol.Availability.NO_ACCESS, PhoneAlarmState.snapshot(context).availability);
+        assertTrue(PhoneAlarmState.snapshot(context).readFailed);
         assertFalse(PhoneAlarmState.matches(context, first.revision, AlarmAction.ARM_STAY));
         answer = failure(AdtPortalClient.Status.UNAVAILABLE); read();
-        assertEquals(AlarmStateProtocol.Availability.OFFLINE, PhoneAlarmState.snapshot(context).availability);
+        PhoneAlarmState.Snapshot afterBlip = PhoneAlarmState.snapshot(context);
+        assertEquals("A transient failure keeps the fresh observation usable", AlarmStateProtocol.Availability.READY, afterBlip.availability);
+        assertTrue(afterBlip.readFailed);
+        assertEquals(first.observationId, afterBlip.observationId);
+        assertTrue(PhoneAlarmState.matches(context, first.revision, AlarmAction.ARM_STAY));
+        advance(60_000);
+        assertEquals("Only until the observation's own freshness runs out", AlarmStateProtocol.Availability.OFFLINE,
+            PhoneAlarmState.snapshot(context).availability);
         answer = result(AlarmStateProtocol.State.DISARMED);
-        assertEquals(AlarmStateProtocol.Availability.READY, read().availability);
+        PhoneAlarmState.Snapshot recovered = read();
+        assertEquals(AlarmStateProtocol.Availability.READY, recovered.availability);
+        assertFalse(recovered.readFailed);
+    }
+    @Test public void aFailedReadCannotSettleARequestWhoseOutcomeIsStillOpen() {
+        bind(); PhoneAlarmState.Snapshot first = read();
+        String request = UUID.randomUUID().toString();
+        assertTrue(PhoneAlarmState.beginCommand(context, first.revision, AlarmAction.ARM_STAY, request));
+        advance(5_000);
+        PhoneAlarmState.Snapshot during = read(); // Still Disarmed inside the window: reported as BUSY.
+        assertTrue(during.pending); assertEquals(AlarmStateProtocol.Availability.BUSY, during.availability);
+        assertNotEquals(first.observationId, during.observationId);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE); advance(10_000);
+        assertEquals("A blip inside the window does not keep BUSY", AlarmStateProtocol.Availability.OFFLINE, read().availability);
+        advance(15_000); // The 30-second window closes on a read that fails.
+        PhoneAlarmState.Snapshot boundary = read();
+        assertTrue(boundary.readFailed); assertFalse("The window has closed", boundary.pending);
+        assertEquals("The observation from inside the window is not re-reported as the settled result",
+            AlarmStateProtocol.Availability.OFFLINE, boundary.availability);
+        assertFalse(PhoneAlarmState.matches(context, first.revision, AlarmAction.ARM_STAY));
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        PhoneAlarmState.Snapshot after = read();
+        assertEquals(AlarmStateProtocol.Availability.READY, after.availability);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, after.state);
+        assertEquals("-", after.completedRequest);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        assertEquals("An observation made after the window survives a later blip", AlarmStateProtocol.Availability.READY,
+            read().availability);
     }
     @Test public void explicitBindingAndMidReadChangeRejectWrongHome() {
         bind(); read();
@@ -119,11 +155,13 @@ public final class PhoneAlarmStateTest {
         assertEquals("Past the window the phone reads ADT again", 2, queries);
         assertNotEquals(first.observationId, renewed.observationId);
         answer = failure(AdtPortalClient.Status.UNAVAILABLE); advance(1);
-        assertEquals(AlarmStateProtocol.Availability.OFFLINE, PhoneAlarmState.refresh(context, 0).availability);
+        PhoneAlarmState.Snapshot blip = PhoneAlarmState.refresh(context, 0);
+        assertTrue(blip.readFailed); assertFalse(blip.verified);
+        assertEquals("The fresh observation outlives a transient failure", AlarmStateProtocol.Availability.READY, blip.availability);
         assertEquals(3, queries);
         answer = result(AlarmStateProtocol.State.DISARMED); advance(1);
-        assertEquals("A failed read is not reused; the next caller retries at once",
-            AlarmStateProtocol.Availability.READY, PhoneAlarmState.refresh(context).availability);
+        PhoneAlarmState.Snapshot retried = PhoneAlarmState.refresh(context);
+        assertFalse("A failed read is not reused; the next caller retries at once", retried.readFailed);
         assertEquals(4, queries);
     }
     @Test public void onlyACompletedOrSharedReadIsVerified() {
