@@ -218,7 +218,10 @@ Credentials remain encrypted in private phone storage and are not included in
 backups. They cannot be recovered from GitHub or transferred with this app's
 source. After restarting the phone, unlock it once before background use.
 Automatic login is unofficial and still needs real-account and overnight
-validation. It does not renew the separate native ADT app session or retry an
+validation, and it signs in at www.alarm.com only: the screen warns when your
+last verified session host is smartservices.adt.co.uk, where it may stop at ADT
+verification, so rely on it only after the test succeeds. It does not renew the
+separate native ADT app session or retry an
 alarm command. Errors display a closed **Check code** that can be shared without
 including account details.
 

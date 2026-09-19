@@ -19,6 +19,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.net.URI;
 import java.util.Arrays;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -83,6 +84,8 @@ public final class AdtAutoLoginActivity extends Activity {
             + "again when its website session expires. Background status checks may use them while your phone is locked. "
             + "This is separate from the ADT app. ADT may still require a verification code or manual sign-in.", 15);
         text(column, "Saving and testing sends no alarm command. Saved details are never shown here.", 15);
+        String host = sessionHostNote();
+        if (host != null) text(column, host, 15);
         username = input(column, "ADT username", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
         password = input(column, "ADT password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         save = button(column, "Save and test automatic login", this::saveAndTest);
@@ -190,6 +193,14 @@ public final class AdtAutoLoginActivity extends Activity {
     private boolean phoneUnlocked() {
         KeyguardManager lock = getSystemService(KeyguardManager.class);
         return lock != null && !lock.isKeyguardLocked() && !lock.isDeviceLocked();
+    }
+    /** Login is fixed to www.alarm.com; a session verified on the ADT host cannot lend it a trusted-device cookie. */
+    private String sessionHostNote() {
+        String verified = AdtPortalSession.verifiedOrigin(this);
+        if (verified == null || AdtLoginClient.ORIGIN.equals(verified)) return null;
+        return "Your last verified ADT session was on " + URI.create(verified).getHost() + ". Automatic login signs in at "
+            + "www.alarm.com only, so it cannot reuse that host's trusted-device cookie and may stop at ADT verification. "
+            + "Save and test automatic login shows whether it works for your account before anything relies on it.";
     }
     private void updateButtons() {
         if (save == null) return;

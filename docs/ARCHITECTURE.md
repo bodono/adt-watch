@@ -59,7 +59,11 @@ invalidate older server sessions during a new login. MFA challenges must be
 completed in the official website. Requests, responses and errors have only
 closed diagnostics. No password, cookie or account body is logged. Starting a
 new login invalidates older native sessions' cookie writes, and interactive
-website sign-in suspends automatic attempts.
+website sign-in suspends automatic attempts. Status reads may follow a session
+to the ADT portal host, but login is fixed to www.alarm.com: a trusted-device
+cookie held on the ADT host is not seeded, so such an account's automatic login
+can stop at verification. The automatic-login screen says so whenever the last
+verified session host is not www.alarm.com.
 
 This is an unofficial login flow. The branded ADT login page, CAPTCHA, changed
 website forms and server-mandated verification are not automatically solved.

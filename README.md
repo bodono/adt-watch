@@ -41,6 +41,10 @@ session can trigger one automatic re-login and a fresh status read. Additional
 verification, rejected credentials or an unsupported login page pause recovery
 until you check it on the phone. The helper never retries an alarm command.
 See [automatic login setup](docs/RECOVERY.md#optional-automatic-login).
+Automatic login signs in at www.alarm.com only: when the setup screen reports a
+session host of smartservices.adt.co.uk, that sign-in's trusted-device cookie
+cannot be reused and an ADT verification step pauses automatic login, which the
+explicit test shows before anything relies on it.
 
 The status client uses a fixed, read-only part of Alarm.com's website API. This
 is an unofficial integration, not a supported public ADT API. It supports one
