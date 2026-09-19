@@ -60,8 +60,8 @@ public final class AdtPortalClientTest {
         assertEquals(AdtPortalClient.ORIGIN + "/web/api/devices/partitions/" + PARTITION, transport.requests.get(2).url);
     }
 
-    @Test public void statusReadsOnlyTheBoundPartition() throws Exception {
-        transport.responses.add(json(partition(2, 2)));
+    @Test public void statusReadsOnlyTheBoundPartitionWhenItNamesTheSavedSystemAsOwner() throws Exception {
+        transport.responses.add(json(owned(partition(2, 2), SYSTEM)));
         AdtPortalClient.Result result = client.status(SYSTEM, PARTITION, clock.now + 5_000);
         assertEquals(AdtPortalClient.Status.READY, result.status);
         assertEquals(AlarmStateProtocol.State.ARMED_STAY, result.state);
@@ -72,9 +72,35 @@ public final class AdtPortalClientTest {
         assertEquals("One round trip, not two", 1, transport.requests.size());
         assertEquals(AdtPortalClient.ORIGIN + "/web/api/devices/partitions/" + PARTITION, transport.requests.get(0).url);
         assertEquals(1, session.persistCalls);
-        JSONObject loading = partition(1, 1); loading.getJSONObject("data").getJSONObject("attributes").put("loading", true);
+        JSONObject loading = owned(partition(1, 1), SYSTEM); loading.getJSONObject("data").getJSONObject("attributes").put("loading", true);
         transport.responses.add(json(loading));
         assertEquals(AdtPortalClient.Status.BUSY, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+    }
+
+    @Test public void anOwnerlessPartitionResponseIsProvenAgainstTheSavedSystemOrRefused() throws Exception {
+        transport.responses.add(json(partition(2, 2))); transport.responses.add(json(system()));
+        AdtPortalClient.Result result = client.status(SYSTEM, PARTITION, clock.now + 5_000);
+        assertEquals(AdtPortalClient.Status.READY, result.status);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, result.state);
+        assertEquals(SYSTEM, result.systemId); assertEquals("Inert Home", result.systemLabel);
+        assertEquals("SYSTEM/NONE/200", result.diagnosticCode());
+        assertEquals("The saved system id is never merely assumed", 2, transport.requests.size());
+        assertEquals(AdtPortalClient.ORIGIN + "/web/api/devices/partitions/" + PARTITION, transport.requests.get(0).url);
+        assertEquals(AdtPortalClient.ORIGIN + "/web/api/systems/systems/" + SYSTEM, transport.requests.get(1).url);
+        // The saved system lists a different sole partition: this response is not attributed to it.
+        transport.responses.add(json(partition(1, 1)));
+        JSONObject other = system();
+        other.getJSONObject("data").getJSONObject("relationships").put("partitions", new JSONObject().put("data",
+            new JSONArray().put(ref("another-partition", "devices/partition"))));
+        transport.responses.add(json(other));
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+        // A system read that fails fails the whole check; the partition alone proves nothing.
+        transport.responses.add(json(partition(1, 1)));
+        transport.responses.add(new AdtPortalClient.Response(500, "application/json", new byte[0], null));
+        AdtPortalClient.Result failed = client.status(SYSTEM, PARTITION, clock.now + 5_000);
+        assertEquals(AdtPortalClient.Status.UNAVAILABLE, failed.status);
+        assertEquals("SYSTEM/HTTP/500", failed.diagnosticCode());
+        assertEquals(6, transport.requests.size());
     }
 
     @Test public void statusRejectsOtherOwnersOtherPartitionsAndInvalidBindings() throws Exception {
@@ -91,7 +117,7 @@ public final class AdtPortalClientTest {
         transport.responses.add(json(partition(1, 1)));
         assertEquals("The response must carry the bound partition id", AdtPortalClient.Status.AMBIGUOUS,
             client.status(SYSTEM, "another-partition", clock.now + 5_000).status);
-        JSONObject noState = partition(1, 1); noState.getJSONObject("data").getJSONObject("attributes").put("hasState", false);
+        JSONObject noState = owned(partition(1, 1), SYSTEM); noState.getJSONObject("data").getJSONObject("attributes").put("hasState", false);
         transport.responses.add(json(noState));
         assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
         int requests = transport.requests.size();
@@ -487,6 +513,11 @@ public final class AdtPortalClientTest {
         return new AdtPortalClient.Response(200, "application/vnd.api+json; charset=utf-8", value.toString().getBytes(StandardCharsets.UTF_8), null);
     }
     private static JSONObject ref(String id, String type) throws Exception { return new JSONObject().put("id", id).put("type", type); }
+    private static JSONObject owned(JSONObject partitionDocument, String systemId) throws Exception {
+        partitionDocument.getJSONObject("data").put("relationships", new JSONObject().put("system",
+            new JSONObject().put("data", ref(systemId, "systems/system"))));
+        return partitionDocument;
+    }
     private static JSONObject identity() throws Exception {
         return ref("inert-identity", "identity").put("relationships", new JSONObject().put("selectedSystem",
             new JSONObject().put("data", ref(SYSTEM, "systems/system"))));

@@ -32,11 +32,12 @@ completion, that attempt cannot read or overwrite the shared session cookies.
 The client permits only fixed HTTPS GET routes on Alarm.com's website API.
 Setup discovers the account's selected system through the identities endpoint;
 that response may include substantial portal configuration and has a 4 MiB cap.
-Routine checks prove membership in the saved system (fetching it, verifying its
-sole partition, then fetching that partition) once per boot and at most every
-six hours; between proofs they fetch only that partition, still checking its id
-and, when present, its owning system. They omit identity discovery and retain a
-256 KiB cap per response.
+Routine checks fetch the saved partition and accept the response only when it
+carries the bound partition id and names the saved system as its owner. A
+response without that relationship is followed by a read of the saved system,
+which must list the partition as its sole partition; the saved system id is
+never assumed for a response. They omit identity discovery and retain a 256 KiB
+cap per response.
 Cookies are read and stored for each exact API URL so path-scoped sessions work.
 The client validates the returned system and partition relationships, state fields, content
 type and response bounds. It currently accepts exactly one system and one
