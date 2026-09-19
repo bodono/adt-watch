@@ -32,8 +32,6 @@ import java.util.function.BooleanSupplier;
  * An attempted activation means only that the native View's click was invoked.
  */
 final class WidgetHostSession implements AutoCloseable {
-    static final int HOST_ID = 0x41445401;
-    static final String REVIEWED_LABEL = "WATCH ARM STAY";
     private static final ComponentName PROVIDER = new ComponentName("com.adtuk.adtukalarm",
         "com.alarm.alarmmobile.android.WidgetProvider");
     private static final long REVIEWED_VERSION = 2307;
@@ -48,19 +46,11 @@ final class WidgetHostSession implements AutoCloseable {
     private boolean started, closed, listening, rendering, consumed, broken;
     private String status = "Widget host has not started.";
 
-    WidgetHostSession(Context context) {
-        this(context, AlarmAction.ARM_STAY);
-    }
-
     WidgetHostSession(Context context, AlarmAction action) {
         this(context, action, new InstalledBinding(context.getApplicationContext(), action));
     }
 
     // Dependency seam for inert framework-view tests. Production uses InstalledBinding only.
-    WidgetHostSession(Context context, Binding binding) {
-        this(context, AlarmAction.ARM_STAY, binding);
-    }
-
     WidgetHostSession(Context context, AlarmAction action, Binding binding) {
         if (action == null) throw new IllegalArgumentException("An action is required");
         this.context = context.getApplicationContext();
@@ -295,10 +285,6 @@ final class WidgetHostSession implements AutoCloseable {
                 lastViews = null;
             } finally { rendering = false; }
         }
-    }
-
-    static View idleTarget(View tree, Contract ids) {
-        return idleTarget(tree, ids, AlarmAction.ARM_STAY);
     }
 
     static View idleTarget(View tree, Contract ids, AlarmAction action) {

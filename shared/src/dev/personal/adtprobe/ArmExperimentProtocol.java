@@ -104,20 +104,6 @@ public final class ArmExperimentProtocol {
         return encode(Kind.RESULT, action, request, challenge, outcome);
     }
 
-    // Source compatibility while phone fixtures migrate. These emit v2 only.
-    public static byte[] encodePrepare(String request) {
-        return encodePrepare(AlarmAction.ARM_STAY, request);
-    }
-    public static byte[] encodeChallenge(String request, String challenge) {
-        return encodeChallenge(AlarmAction.ARM_STAY, request, challenge);
-    }
-    public static byte[] encodeCommit(String request, String challenge) {
-        return encodeCommit(AlarmAction.ARM_STAY, request, challenge);
-    }
-    public static byte[] encodeResult(String request, String challenge, Outcome outcome) {
-        return encodeResult(AlarmAction.ARM_STAY, request, challenge, outcome);
-    }
-
     /** Watch-only memory state. Caller performs network sends after receiving encoded bytes. */
     public static final class Attempt {
         private final AlarmAction action;
@@ -133,13 +119,7 @@ public final class ArmExperimentProtocol {
 
         public Attempt(AlarmAction action, long elapsedNow) { this(action, UUID.randomUUID().toString(), elapsedNow); }
 
-        public Attempt(long elapsedNow) { this(AlarmAction.ARM_STAY, elapsedNow); }
-
         // Stable local test identity; production callers generate a fresh UUID above.
-        Attempt(String request, long elapsedNow) {
-            this(AlarmAction.ARM_STAY, request, elapsedNow);
-        }
-
         Attempt(AlarmAction action, String request, long elapsedNow) {
             if (action == null || !validUuid(request) || elapsedNow < 0) throw new IllegalArgumentException("Invalid attempt");
             this.action = action;
