@@ -13,6 +13,25 @@ final class AdtPortalSession {
 
     private AdtPortalSession() { }
 
+    /** A cancelled setup read must not rotate cookies after a newer sign-in begins. */
+    static QuerySession cancellable(AdtPortalClient.Session session) { return new QuerySession(session); }
+
+    static final class QuerySession implements AdtPortalClient.Session {
+        private final AdtPortalClient.Session delegate;
+        private boolean active = true;
+        private QuerySession(AdtPortalClient.Session delegate) { this.delegate = delegate; }
+        synchronized void invalidate() { active = false; }
+        private void requireActive() {
+            if (!active) throw new IllegalStateException("ADT status check cancelled");
+        }
+        @Override public synchronized String cookies() { requireActive(); return delegate.cookies(); }
+        @Override public synchronized String cookies(String url) { requireActive(); return delegate.cookies(url); }
+        @Override public synchronized String userAgent() { requireActive(); return delegate.userAgent(); }
+        @Override public synchronized void storeCookie(String value) { requireActive(); delegate.storeCookie(value); }
+        @Override public synchronized void storeCookie(String url, String value) { requireActive(); delegate.storeCookie(url, value); }
+        @Override public synchronized void persist() { if (active) delegate.persist(); }
+    }
+
     /** Create on the UI thread after the WebView has been initialized; use from the query worker. */
     static AdtPortalClient.Session session(Context context) {
         CookieManager manager = CookieManager.getInstance();

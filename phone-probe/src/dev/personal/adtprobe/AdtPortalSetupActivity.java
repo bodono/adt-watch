@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
@@ -33,6 +34,7 @@ import java.util.concurrent.FutureTask;
 /** Official website sign-in and read-only selection of the alarm supplying watch status. */
 public final class AdtPortalSetupActivity extends Activity {
     static final String LOGIN_URL = "https://smartservices.adt.co.uk/";
+    private static final String WEBSITE_OPEN = "websiteOpen";
     private static final long QUERY_MS = 10_000, CHOICE_MS = 60_000;
     interface QueryOperation { AdtPortalClient.Result query(AdtPortalClient.Session session, long deadline); }
     static QueryOperation queryOperation = (session, deadline) -> new AdtPortalClient(session).query(deadline);
@@ -40,10 +42,12 @@ public final class AdtPortalSetupActivity extends Activity {
         Thread thread = new Thread(runnable, "adt-portal-status"); thread.setDaemon(true); return thread;
     });
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private LinearLayout column;
     private WebView web;
     private TextView status;
-    private Button check, use;
+    private Button check, use, signIn;
     private AdtPortalClient.Session session;
+    private AdtPortalSession.QuerySession querySession;
     private AdtPortalClient.Result candidate;
     private FutureTask<Void> inFlight;
     private long queryStarted, deadline, candidateStarted;
@@ -60,10 +64,9 @@ public final class AdtPortalSetupActivity extends Activity {
         }
     };
 
-    @SuppressLint("SetJavaScriptEnabled") // ADT login requires JavaScript; navigation is restricted and no bridge is installed.
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
-        LinearLayout column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
+        column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
         column.setPadding(dp(16), dp(8), dp(16), dp(8)); column.setBackgroundColor(Color.rgb(17, 22, 30));
         setContentView(column);
         column.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -72,12 +75,31 @@ public final class AdtPortalSetupActivity extends Activity {
             return insets;
         });
         text(column, "ADT live status setup", 22);
-        text(column, "Sign in to ADT below, then tap Check live status. This is a separate sign-in from the ADT app. "
+        text(column, "Check live status using your ADT sign-in; open the official sign-in page when needed. "
+            + "This is a separate sign-in from the ADT app. "
             + "Choose the matching system to let the watch read its current status. These checks send no alarm commands.", 14);
         check = button(column, "Check live status", this::beginCheck);
         status = text(column, "Enter your ADT login and any verification code in the ADT page below.", 14);
         use = button(column, "Use this ADT system", this::chooseSystem);
         use.setVisibility(View.GONE);
+        signIn = button(column, "Open ADT sign-in", this::reopenWebsite);
+        boolean needsSignIn = AdtPortalSession.binding(this) == null;
+        if (saved == null ? needsSignIn : saved.getBoolean(WEBSITE_OPEN, needsSignIn)) openWebsite();
+        else status.setText("Your ADT system and sign-in are retained. Tap Check live status. "
+            + "If ADT requires you to sign in again, tap Open ADT sign-in.");
+        session = AdtPortalSession.session(this);
+        updateButtons();
+    }
+
+    private void reopenWebsite() {
+        if (!interactive() || inFlight != null || web != null) return;
+        candidate = null;
+        status.setText("Enter your ADT login and any verification code in the ADT page below.");
+        openWebsite(); updateButtons();
+    }
+
+    @SuppressLint("SetJavaScriptEnabled") // ADT login requires JavaScript; navigation is restricted and no bridge is installed.
+    private void openWebsite() {
         web = new WebView(this);
         web.setSaveEnabled(false);
         WebSettings settings = web.getSettings();
@@ -94,8 +116,17 @@ public final class AdtPortalSetupActivity extends Activity {
         });
         web.setWebViewClient(new PortalNavigation());
         column.addView(web, new LinearLayout.LayoutParams(-1, 0, 1));
-        session = AdtPortalSession.session(this);
         web.loadUrl(LOGIN_URL);
+    }
+
+    private void retireWebsite() {
+        // onPause does not stop website JavaScript. Remove the completed login page,
+        // leaving CookieManager available to the native, read-only status client.
+        WebView old = web; web = null;
+        if (old == null) return;
+        old.stopLoading();
+        if (old.getParent() instanceof ViewGroup) ((ViewGroup) old.getParent()).removeView(old);
+        old.destroy();
     }
 
     private void beginCheck() {
@@ -103,11 +134,13 @@ public final class AdtPortalSetupActivity extends Activity {
         candidate = null; queryStarted = SystemClock.elapsedRealtime(); deadline = queryStarted + QUERY_MS;
         final int ticket = ++generation;
         final long queryDeadline = deadline;
+        final AdtPortalSession.QuerySession attemptSession = AdtPortalSession.cancellable(session);
+        querySession = attemptSession;
         status.setText("Checking ADT…");
         recordDiagnostic("UI/CHECKING", "BUSY", 0);
         FutureTask<Void> work = new FutureTask<>(() -> {
             AdtPortalClient.Result result;
-            try { result = queryOperation.query(session, queryDeadline); }
+            try { result = queryOperation.query(attemptSession, queryDeadline); }
             catch (RuntimeException ignored) { result = null; }
             final AdtPortalClient.Result answer = result;
             handler.post(() -> complete(ticket, answer)); return null;
@@ -124,6 +157,7 @@ public final class AdtPortalSetupActivity extends Activity {
 
     private void complete(int ticket, AdtPortalClient.Result result) {
         if (ticket != generation || inFlight == null || !resumed) return;
+        invalidateQuerySession();
         inFlight = null;
         // Closed diagnostics only: no account IDs, state payloads, URLs, cookies or exception text.
         recordDiagnostic(result == null ? "UI/NO_RESULT" : result.diagnosticCode(),
@@ -154,7 +188,8 @@ public final class AdtPortalSetupActivity extends Activity {
         AdtPortalClient.Result chosen = candidate;
         boolean saved = AdtPortalSession.bind(this, chosen.systemId, chosen.partitionId);
         candidate = null;
-        status.setText(saved ? "ADT system selected. Only the system and partition identifiers were saved. "
+        if (saved) { CookieManager.getInstance().flush(); retireWebsite(); }
+        status.setText(saved ? "ADT system selected. The sign-in page is closed; your sign-in is retained. "
             + "No alarm command was sent. Lock your phone and swipe to the watch tile to fetch ADT status."
             : "The ADT system could not be saved. Check live status and try again.");
         updateButtons();
@@ -173,14 +208,21 @@ public final class AdtPortalSetupActivity extends Activity {
         if (check != null) check.setEnabled(interactive() && inFlight == null);
         if (use != null) { use.setVisibility(candidate == null ? View.GONE : View.VISIBLE);
             use.setEnabled(interactive() && inFlight == null && freshCandidate()); }
+        if (signIn != null) { signIn.setVisibility(web == null ? View.VISIBLE : View.GONE);
+            signIn.setEnabled(interactive() && inFlight == null); }
     }
     private void cancelQuery() {
         generation++;
+        invalidateQuerySession();
         FutureTask<Void> old = inFlight; inFlight = null;
         if (old != null) old.cancel(true);
     }
-    private void pageChanged(boolean blocked) {
-        if (isDestroyed()) return;
+    private void invalidateQuerySession() {
+        AdtPortalSession.QuerySession old = querySession; querySession = null;
+        if (old != null) old.invalidate();
+    }
+    private void pageChanged(WebView owner, boolean blocked) {
+        if (owner != web || isDestroyed()) return;
         boolean checking = inFlight != null || candidate != null;
         cancelQuery(); candidate = null;
         if (blocked) status.setText("An unsupported navigation was blocked. Continue signing in on the ADT page.");
@@ -202,21 +244,23 @@ public final class AdtPortalSetupActivity extends Activity {
 
     private final class PortalNavigation extends WebViewClient {
         @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-            return blockIfUnexpected(request.getUrl().toString());
+            return blockIfUnexpected(view, request.getUrl().toString());
         }
-        @Override public boolean shouldOverrideUrlLoading(WebView view, String url) { return blockIfUnexpected(url); }
-        private boolean blockIfUnexpected(String url) {
+        @Override public boolean shouldOverrideUrlLoading(WebView view, String url) { return blockIfUnexpected(view, url); }
+        private boolean blockIfUnexpected(WebView view, String url) {
+            if (view != web) return true;
             if (allowedNavigation(url)) return false;
-            pageChanged(true); return true;
+            pageChanged(view, true); return true;
         }
         @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+            if (view != web) return;
             boolean allowed = allowedNavigation(url);
             if (!allowed) view.stopLoading();
-            pageChanged(!allowed);
+            pageChanged(view, !allowed);
         }
         @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
             if (request.isForMainFrame() && !allowedNavigation(request.getUrl().toString())) {
-                handler.post(() -> pageChanged(true));
+                handler.post(() -> pageChanged(view, true));
                 return new WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", Collections.emptyMap(),
                     new ByteArrayInputStream("Unsupported navigation.".getBytes(StandardCharsets.UTF_8)));
             }
@@ -225,12 +269,14 @@ public final class AdtPortalSetupActivity extends Activity {
         // Keep WebView's default TLS and certificate-error rejection. No JavaScript bridge is installed.
     }
 
-    private static String failureMessage(AdtPortalClient.Status result) {
-        if (result == null) return "ADT status is unavailable. Sign in below, then try again.";
+    private String failureMessage(AdtPortalClient.Status result) {
+        String signIn = web == null ? "Tap Open ADT sign-in" : "Sign in to ADT below";
+        if (result == null) return "ADT status is unavailable. " + signIn + ", then try again.";
         switch (result) {
-            case LOGIN_REQUIRED: return "Sign in to ADT below, then tap Check live status.";
-            case VERIFY_LOGIN: return "Complete ADT's login verification below, then tap Check live status.";
-            case BUSY: return "ADT has not confirmed a settled status. No system was selected. Check the ADT page, then try again.";
+            case LOGIN_REQUIRED: return signIn + ", then tap Check live status.";
+            case VERIFY_LOGIN: return (web == null ? "Tap Open ADT sign-in and complete ADT's login verification"
+                : "Complete ADT's login verification below") + ", then tap Check live status.";
+            case BUSY: return "ADT has not confirmed a settled status. No system was selected. Try the status check again.";
             case AMBIGUOUS: return "ADT returned more than one system or partition. No system was selected.";
             case UNSUPPORTED: return "This ADT status response is not supported. No system was selected.";
             default: return "The ADT status request failed. Check code below; signing in again may not be needed.";
@@ -263,9 +309,12 @@ public final class AdtPortalSetupActivity extends Activity {
         updateButtons(); if (web != null) web.onPause(); CookieManager.getInstance().flush(); super.onPause();
     }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); updateButtons(); }
+    @Override public void onSaveInstanceState(Bundle out) {
+        out.putBoolean(WEBSITE_OPEN, web != null); super.onSaveInstanceState(out);
+    }
     @Override public void onDestroy() {
         cancelQuery(); handler.removeCallbacksAndMessages(null);
-        if (web != null) { web.stopLoading(); ((LinearLayout) web.getParent()).removeView(web); web.destroy(); web = null; }
+        retireWebsite();
         super.onDestroy();
     }
 }

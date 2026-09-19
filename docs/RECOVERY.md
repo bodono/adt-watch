@@ -87,6 +87,8 @@ builds at the same version and signature. Update the watch first, then the phone
 Both apps need v0.23 for live-query observation identity and freshness handling.
 After updating an earlier installation, complete the new website sign-in and
 explicit system selection below; existing native ADT sign-in is not enough.
+An existing sign-in and system selection in this helper are retained by an
+in-place update. Check live status before repeating that setup.
 
 ## Fresh phone setup
 
@@ -134,6 +136,9 @@ compatibility review.
    it is the same home as both scene widgets. No system is selected automatically.
    Only one system with one partition is currently supported. The status check
    and selection send no alarm command and do not enable watch control.
+   After selection, the website closes while the helper keeps its sign-in.
+   Later visits can **Check live status** directly; **Open ADT sign-in** reopens
+   the website when sign-in or verification is needed.
 
 6. **Enable routine controls once.** With exactly one watch connected, open
    **Watch control access… → Enable watch controls once…**. Choose the associated
@@ -201,13 +206,21 @@ still require physical verification.
   ends with an unconfirmed outcome; Refresh makes a new read-only status query.
   The helper cannot recall native ADT work already handed off.
 - **Sign-in or verification required:** unlock the phone and return to **Set up
-  ADT live status…**. Finish the official page's sign-in or verification, then
-  **Check live status** and review the same system again. The native ADT app's
+  ADT live status… → Open ADT sign-in**. Finish the official page's sign-in or
+  verification, then **Check live status** and review the same system again. The native ADT app's
   existing login does not refresh this separate website session.
 - **Grey before any request or Refresh fails:** check the phone connection,
   both sign-ins, selected system and supported ADT version. Website/network
   errors cannot provide a fresh observation. Notification access alone cannot
   repair a failed live query. Use ADT normally while status is unavailable.
+- **Check live status fails despite being signed in:** the setup screen's
+  **Check code** identifies the failed request stage and error category, with
+  an HTTP status when available. Share that code when reporting a problem;
+  it contains no account details. For example, `IDENTITIES/RESPONSE_SIZE/200`
+  means the account-discovery response exceeded the supported size, rather
+  than a failed password. v0.23 increases that discovery limit. A timeout or
+  server error can be retried with **Check live status**; signing in again is
+  needed when the screen specifically requests sign-in or verification.
 - **More than one system/partition or an unsupported response:** this version
   cannot select an arbitrary member of a multi-system account or guess an
   unfamiliar state. A compatibility change is needed; keep using ADT directly.

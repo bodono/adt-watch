@@ -20,6 +20,15 @@ session cookies in app-private storage; the status client uses those cookies
 for authenticated queries. No JavaScript bridge is installed. Session expiry or
 additional verification requires the owner to return to the sign-in page.
 
+After explicit system selection, setup destroys the website view while retaining
+its cookies and the selected identifiers. Later setup visits can query that
+saved session immediately; only **Open ADT sign-in** reopens the website. An
+unfinished login or verification page stays open across background/foreground
+transitions. This removes the completed page's JavaScript from the background;
+it does not extend or guarantee the server's session lifetime.
+Each setup query has a cancellable session wrapper. After cancellation or
+completion, that attempt cannot read or overwrite the shared session cookies.
+
 The client permits only fixed HTTPS GET routes on Alarm.com's website API.
 Setup discovers the account's selected system through the identities endpoint;
 that response may include substantial portal configuration and has a 4 MiB cap.

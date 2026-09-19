@@ -403,6 +403,41 @@ public final class AdtPortalClientTest {
         assertEquals(2, transport.requests.size());
     }
 
+    @Test public void cancelledSetupResponseCannotReplaceNewLoginCookiesOrContinueQuerying() throws Exception {
+        for (int cancelledStage = 0; cancelledStage < 3; cancelledStage++) {
+            FakeSession savedSession = new FakeSession();
+            AdtPortalSession.QuerySession querySession = AdtPortalSession.cancellable(savedSession);
+            List<AdtPortalClient.Response> responses = Arrays.asList(json(identities()), json(system()), json(partition(1, 1)));
+            int stopAt = cancelledStage;
+            int[] requests = {0};
+            AdtPortalClient.Transport delayed = (request, deadline) -> {
+                int stage = requests[0]++;
+                AdtPortalClient.Response response = responses.get(stage);
+                if (stage == stopAt) {
+                    // A navigation/cancel and newer sign-in happen before the old HTTP response arrives.
+                    querySession.invalidate();
+                    savedSession.cookie = "session=inert-new-login; afg=inert-new-afg";
+                    return new AdtPortalClient.Response(response.code, response.contentType, response.body,
+                        Collections.singletonList("session=inert-old-login; Path=/web"));
+                }
+                return response;
+            };
+            AdtPortalClient.Result result = new AdtPortalClient(querySession, delayed, clock).query(5_000);
+            assertNotEquals(AdtPortalClient.Status.READY, result.status);
+            assertEquals(stopAt + 1, requests[0]);
+            assertEquals("session=inert-new-login; afg=inert-new-afg", savedSession.cookie);
+            assertTrue(savedSession.saved.isEmpty());
+            assertEquals(0, savedSession.persistCalls);
+
+            // Cancellation belongs to the old read, so a deliberate new check can use the saved login.
+            AdtPortalSession.QuerySession next = AdtPortalSession.cancellable(savedSession);
+            FakeTransport fresh = new FakeTransport(clock);
+            fresh.responses.addAll(responses);
+            assertEquals(AdtPortalClient.Status.READY, new AdtPortalClient(next, fresh, clock).query(5_000).status);
+            assertEquals(1, savedSession.persistCalls);
+        }
+    }
+
     private void enqueue(int actual, int desired) throws Exception { enqueue(identities(), system(), partition(actual, desired)); }
     private void enqueue(JSONObject... documents) { for (JSONObject document : documents) transport.responses.add(json(document)); }
     private static AdtPortalClient.Response json(JSONObject value) {

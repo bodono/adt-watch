@@ -6,8 +6,10 @@ import android.content.SharedPreferences;
 import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.CookieManager;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.TextView;
 import java.time.Duration;
@@ -42,6 +44,8 @@ public final class AdtPortalSetupActivityTest {
     private Executor oldExecutor;
     private AdtPortalSetupActivity.QueryOperation oldOperation;
     private AdtPortalClient.Result answer;
+    private AdtPortalClient.Session queriedSession;
+    private String queriedCookies;
     private int queries;
 
     @Before public void prepare() {
@@ -51,7 +55,9 @@ public final class AdtPortalSetupActivityTest {
             .putString("sentinel", "unchanged").commit();
         oldExecutor = AdtPortalSetupActivity.queryExecutor; oldOperation = AdtPortalSetupActivity.queryOperation;
         AdtPortalSetupActivity.queryExecutor = work::add;
-        AdtPortalSetupActivity.queryOperation = (session, deadline) -> { queries++; return answer; };
+        AdtPortalSetupActivity.queryOperation = (session, deadline) -> {
+            queries++; queriedSession = session; queriedCookies = session.cookies(); return answer;
+        };
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setKeyguardLocked(false);
         Shadows.shadowOf(context.getSystemService(KeyguardManager.class)).setIsDeviceLocked(false);
         controller = Robolectric.buildActivity(AdtPortalSetupActivity.class).setup().visible();
@@ -96,6 +102,97 @@ public final class AdtPortalSetupActivityTest {
         assertTrue(AdtPortalSession.valid(context, AdtPortalSession.binding(context)));
     }
 
+    @Test public void choosingSystemRetiresWebsiteButNativeChecksKeepItsCookiesAndBinding() {
+        WebView login = web();
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setCookie(AdtPortalSession.COOKIE_ORIGIN, "inert_session=fixture; Path=/; Secure");
+        answer = ready(); begin(); finishQuery();
+        AdtPortalClient.Session original = queriedSession;
+        button("Use this ADT system").performClick();
+        AdtPortalSession.Binding selected = AdtPortalSession.binding(context);
+
+        assertNull(web()); assertNull(login.getParent());
+        assertTrue(Shadows.shadowOf(login).wasDestroyCalled());
+        assertTrue(cookies.getCookie(AdtPortalSession.COOKIE_ORIGIN).contains("inert_session=fixture"));
+        assertTrue(AdtPortalSession.valid(context, selected));
+        assertEquals(View.VISIBLE, button("Open ADT sign-in").getVisibility());
+        assertEquals(1, queries);
+        begin(); finishQuery();
+        assertNotSame(original, queriedSession); assertEquals(2, queries);
+        assertTrue(queriedCookies.contains("inert_session=fixture"));
+        assertTrue(button("Use this ADT system").isEnabled());
+        assertNull(web()); assertTrue(AdtPortalSession.valid(context, selected));
+        assertFalse(ArmExperimentService.isRunning());
+    }
+
+    @Test public void unfinishedVerificationKeepsItsWebsiteAcrossBackgroundAndReturn() {
+        WebView login = web();
+        answer = new AdtPortalClient.Result(AdtPortalClient.Status.VERIFY_LOGIN,
+            AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 42);
+        begin(); finishQuery();
+        controller.pause().stop();
+        assertSame(login, web()); assertFalse(Shadows.shadowOf(login).wasDestroyCalled());
+        assertTrue(Shadows.shadowOf(login).wasOnPauseCalled());
+        controller.restart().start().resume().windowFocusChanged(true); idle();
+        assertSame(login, web()); assertTrue(Shadows.shadowOf(login).wasOnResumeCalled());
+        assertEquals(View.GONE, button("Open ADT sign-in").getVisibility());
+        assertNull(AdtPortalSession.binding(context)); assertEquals(1, queries); assertTrue(work.isEmpty());
+    }
+
+    @Test public void completedSetupStaysRetiredOnResumeRecreationAndLaterVisitUntilExplicitSignIn() {
+        answer = ready(); begin(); finishQuery(); button("Use this ADT system").performClick();
+        AdtPortalSession.Binding selected = AdtPortalSession.binding(context);
+        controller.pause(); controller.resume().windowFocusChanged(true); idle();
+        assertNull(web());
+        controller.recreate(); activity = controller.get(); controller.windowFocusChanged(true); idle();
+        assertNull(web()); assertTrue(button("Check live status").isEnabled());
+        controller.pause().stop().destroy();
+        controller = Robolectric.buildActivity(AdtPortalSetupActivity.class).setup().visible();
+        activity = controller.get(); controller.windowFocusChanged(true); idle();
+        assertNull(web()); assertEquals(1, queries); assertTrue(work.isEmpty());
+        assertTrue(AdtPortalSession.valid(context, selected));
+
+        button("Open ADT sign-in").performClick();
+        assertNotNull(web());
+        assertEquals(AdtPortalSetupActivity.LOGIN_URL, Shadows.shadowOf(web()).getLastLoadedUrl());
+        assertFalse(web().getSettings().getAllowFileAccess());
+        assertTrue(AdtPortalSession.valid(context, selected));
+        assertEquals(1, queries); assertTrue(work.isEmpty());
+    }
+
+    @Test public void retiredWebsiteCallbacksCannotCancelNativeCheckOrReplacementLoginResult() {
+        WebView old = web(); WebViewClient navigation = old.getWebViewClient();
+        answer = ready(); begin(); finishQuery(); button("Use this ADT system").performClick();
+        String selected = screenText();
+        navigation.onPageStarted(old, "https://www.alarm.com/login.aspx", null);
+        assertTrue(navigation.shouldOverrideUrlLoading(old, "https://www.alarm.com/login.aspx"));
+        assertEquals(selected, screenText());
+        begin();
+        navigation.onPageStarted(old, "https://unsupported.invalid/", null);
+        finishQuery();
+        assertTrue(button("Use this ADT system").isEnabled());
+        button("Open ADT sign-in").performClick();
+        assertNotSame(old, web());
+        begin(); finishQuery();
+        navigation.onPageStarted(old, "https://www.alarm.com/login.aspx", null);
+        assertTrue(button("Use this ADT system").isEnabled());
+        assertEquals(3, queries);
+    }
+
+    @Test public void expiredSavedSessionOffersExplicitSignInWithoutOpeningWebsiteAutomatically() {
+        answer = ready(); begin(); finishQuery(); button("Use this ADT system").performClick();
+        AdtPortalSession.Binding selected = AdtPortalSession.binding(context);
+        for (AdtPortalClient.Status status : new AdtPortalClient.Status[]{
+                AdtPortalClient.Status.LOGIN_REQUIRED, AdtPortalClient.Status.VERIFY_LOGIN}) {
+            answer = new AdtPortalClient.Result(status, AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 42);
+            begin(); finishQuery();
+            assertTrue(screenText().contains("Tap Open ADT sign-in"));
+            assertTrue(button("Open ADT sign-in").isEnabled()); assertNull(web());
+            assertEquals(View.GONE, button("Use this ADT system").getVisibility());
+            assertTrue(AdtPortalSession.valid(context, selected));
+        }
+    }
+
     @Test public void timeoutCannotBeReplacedByAnOldSuccessfulResultOrAutoRetry() {
         context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).edit()
             .putString("code", "IDENTITIES/HTTP/500").commit();
@@ -119,6 +216,23 @@ public final class AdtPortalSetupActivityTest {
         assertEquals(View.GONE, button("Use this ADT system").getVisibility());
         assertTrue(screenText().contains("Tap Check live status"));
         assertEquals("UI/CANCELLED", context.getSharedPreferences("adt_portal_diagnostics", Context.MODE_PRIVATE).getString("code", ""));
+        assertThrows(IllegalStateException.class, () -> queriedSession.storeCookie("stale_session=ignored; Path=/; Secure"));
+    }
+
+    @Test public void newNavigationAndAcceptedCompletionCloseOnlyTheirOwnQueryCookieWriter() {
+        answer = ready(); begin(); work.remove().run();
+        AdtPortalClient.Session cancelled = queriedSession;
+        web().getWebViewClient().onPageStarted(web(), "https://www.alarm.com/login.aspx", null);
+        CookieManager.getInstance().setCookie(AdtPortalSession.COOKIE_ORIGIN, "inert_session=new_login; Path=/; Secure");
+        assertThrows(IllegalStateException.class, () -> cancelled.storeCookie("inert_session=old_query; Path=/; Secure"));
+        idle();
+        assertEquals(View.GONE, button("Use this ADT system").getVisibility());
+        begin(); finishQuery();
+        assertNotSame(cancelled, queriedSession);
+        assertTrue(queriedCookies.contains("inert_session=new_login"));
+        assertTrue(button("Use this ADT system").isEnabled());
+        assertThrows(IllegalStateException.class, () -> queriedSession.storeCookie("inert_session=late_query; Path=/; Secure"));
+        assertTrue(CookieManager.getInstance().getCookie(AdtPortalSession.COOKIE_ORIGIN).contains("inert_session=new_login"));
     }
 
     @Test public void expiryLockAndNewNavigationInvalidateChoiceWithoutSaving() {
