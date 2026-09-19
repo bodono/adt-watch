@@ -45,16 +45,20 @@ authentication failure it serializes one login attempt inside the existing
 query deadline and requires a fresh, matching status response before returning
 state. It never sends or replays an alarm action. An attempt is recorded before
 submission; transient failures have a five-minute retry delay, while rejected
-credentials, renewed verification and unsupported flows pause attempts until
-an explicit successful test. A cancelled or failed retest cannot enable recovery.
+credentials, renewed verification and any failure after credentials were sent
+pause attempts until an explicit successful test. A login page the parser
+cannot use costs one GET and no submission, and is retried after the delay. A
+cancelled or failed retest cannot enable recovery.
 The main screen's status line and the automatic-login screen say when attempts
 are paused or waiting, with the closed code. Signing in on the website and
 choosing the system again resumes paused attempts without re-verifying the
 saved credentials; a rejected password pauses them again after one attempt.
 
-`AdtLoginClient` is separate from the GET-only status client. It reads the
-verified Alarm.com login form and sends credentials once to the fixed HTTPS
-`www.alarm.com/web/Default.aspx` endpoint. It never follows a credential POST
+`AdtLoginClient` is separate from the GET-only status client. It locates the
+Alarm.com page form by its ASP.NET id, ignores other forms on the page, submits
+the hidden fields that form offers (`__VIEWSTATEENCRYPTED` only when present)
+and sends credentials once to the fixed HTTPS `www.alarm.com/web/Default.aspx`
+endpoint. It never follows a credential POST
 redirect. Each attempt uses an isolated temporary cookie jar, seeded only with
 the same-app trusted-device cookie. A successful read of the selected home
 commits the new cookies; failed tests leave the existing cookie jar unchanged

@@ -27,6 +27,7 @@ public final class AdtSessionRecoveryTest {
     private String version;
     private int logins, reads, cookieWrites;
     private AdtLoginClient.Status loginStatus;
+    private AdtLoginClient.Stage loginStage = AdtLoginClient.Stage.SUBMIT;
     private AdtPortalClient.Result response;
     private char[] suppliedPassword;
     private long website;
@@ -64,7 +65,7 @@ public final class AdtSessionRecoveryTest {
         AdtSessionRecovery.readOperation = oldRead; AdtSessionRecovery.credentials = oldCredentials;
     }
     private AdtLoginClient.Result loginAnswer() {
-        return new AdtLoginClient.Result(loginStatus, 1, AdtLoginClient.Stage.SUBMIT, AdtLoginClient.Reason.NONE, 200);
+        return new AdtLoginClient.Result(loginStatus, 1, loginStage, AdtLoginClient.Reason.NONE, 200);
     }
     private AdtPortalClient.Result ready(String system) {
         return new AdtPortalClient.Result(AdtPortalClient.Status.READY, AlarmStateProtocol.State.DISARMED,
@@ -119,6 +120,24 @@ public final class AdtSessionRecoveryTest {
         allowNextAttempt(); assertSame(original, recover(original)); assertEquals(2, logins);
         loginStatus = AdtLoginClient.Status.SUBMITTED;
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); assertEquals(3, logins);
+    }
+    @Test public void anUnusableLoginPageIsRetriedLaterButAJudgedSubmissionPauses() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        loginStatus = AdtLoginClient.Status.UNSUPPORTED; loginStage = AdtLoginClient.Stage.FORM;
+        assertSame(original, recover(original)); assertEquals(2, logins);
+        assertFalse("No credentials were submitted, so only the retry delay applies",
+            app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("blocked", false));
+        assertEquals("FORM/NONE/200", app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getString("code", ""));
+        assertSame(original, recover(original)); assertEquals("Cooling down", 2, logins);
+        allowNextAttempt(); assertSame(original, recover(original)); assertEquals(3, logins);
+        loginStage = AdtLoginClient.Stage.SUBMIT; // An unrecognised answer after the POST left the phone.
+        allowNextAttempt(); assertSame(original, recover(original)); assertEquals(4, logins);
+        assertTrue("The credentials were judged: paused", app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("blocked", false));
+        allowNextAttempt(); assertSame(original, recover(original)); assertEquals(4, logins);
+        loginStatus = AdtLoginClient.Status.VERIFY_LOGIN; loginStage = AdtLoginClient.Stage.FORM;
+        assertFalse(AdtSessionRecovery.test(app, deadline()).ready);
+        assertTrue("A challenge on the login page needs the owner", app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("blocked", false));
     }
     @Test public void transientLoginFailureIsRateLimitedAcrossRepeatedCalls() {
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();

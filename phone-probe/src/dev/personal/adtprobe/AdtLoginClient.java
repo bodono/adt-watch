@@ -35,8 +35,9 @@ final class AdtLoginClient {
     private static final String USER_FIELD = "ctl00$ContentPlaceHolder1$loginform$txtUserName";
     private static final String PASSWORD_FIELD = "txtPassword";
     private static final List<String> REQUIRED = Arrays.asList("__VIEWSTATE", "__VIEWSTATEGENERATOR",
-        "__VIEWSTATEENCRYPTED", "__PREVIOUSPAGE", "__EVENTVALIDATION");
-    private static final List<String> OPTIONAL = Arrays.asList("__EVENTTARGET", "__EVENTARGUMENT",
+        "__PREVIOUSPAGE", "__EVENTVALIDATION");
+    // Submitted when the page offers them; __VIEWSTATEENCRYPTED is only present when ASP.NET encrypts view state.
+    private static final List<String> OPTIONAL = Arrays.asList("__VIEWSTATEENCRYPTED", "__EVENTTARGET", "__EVENTARGUMENT",
         "loginFolder", "IsFromNewSite", "JavaScriptTest", "ctl00$ContentPlaceHolder1$loginform$hidLoginID");
     private static final Pattern TAG = Pattern.compile("(?is)<(form|input)\\b((?:[^'\">]|\"[^\"]*\"|'[^']*')*)>");
     private static final Pattern ATTRIBUTE = Pattern.compile("\\s*([A-Za-z_:][A-Za-z0-9_.:-]*)(?:\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'=<>`]+)))?");
@@ -187,7 +188,9 @@ final class AdtLoginClient {
         return response;
     }
     private static void requireHttp(int code) throws Failure {
-        if (code == 401 || code == 429) throw new Failure(Status.REJECTED, Reason.HTTP);
+        if (code == 401) throw new Failure(Status.REJECTED, Reason.HTTP);
+        // Throttling judges nothing about the credentials; the coordinator's retry delay is the right answer.
+        if (code == 429) throw new Failure(Status.UNAVAILABLE, Reason.HTTP);
         if (code == 403 || code == 409 || code == 423) throw new Failure(Status.VERIFY_LOGIN, Reason.HTTP);
         if (code >= 400) throw new Failure(Status.UNAVAILABLE, Reason.HTTP);
     }
@@ -202,39 +205,46 @@ final class AdtLoginClient {
     private static Map<String, String> parseForm(String source, String path) throws Failure {
         if (challenge(source)) throw new Failure(Status.VERIFY_LOGIN, Reason.CHALLENGE);
         String document = markup(source);
-        Map<String, String> fields = new LinkedHashMap<>();
-        boolean formSeen = false, user = false, password = false;
-        int formEnd = -1;
+        String lower = document.toLowerCase(Locale.ROOT);
+        // Only the ASP.NET page form (id aspnetForm) carries the credential fields. Other forms on
+        // the page, such as a search box or a cookie banner, are ignored; the credential target is
+        // still checked exactly, and a second page form is refused.
+        int formStart = -1, formEnd = -1;
         Matcher tags = TAG.matcher(document);
         while (tags.find()) {
+            if (!"form".equalsIgnoreCase(tags.group(1))) continue;
             Map<String, String> attr = attributes(tags.group(2));
-            if ("form".equalsIgnoreCase(tags.group(1))) {
-                if (formSeen || !"aspnetForm".equals(attr.get("id")) || !"post".equalsIgnoreCase(attr.get("method")))
-                    throw new Failure(Status.UNSUPPORTED, Reason.FORM);
-                String action = target(path, attr.get("action"));
-                if (!LOGIN_PATH.equals(action) && !POST_PATH.equals(action)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
-                formEnd = document.toLowerCase(Locale.ROOT).indexOf("</form", tags.end());
-                if (formEnd < 0) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
-                formSeen = true; continue;
-            }
+            if (!"aspnetForm".equals(attr.get("id"))) continue;
+            if (formStart >= 0 || !"post".equalsIgnoreCase(attr.get("method"))) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+            String action = target(path, attr.get("action"));
+            if (!LOGIN_PATH.equals(action) && !POST_PATH.equals(action)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+            formStart = tags.end(); formEnd = lower.indexOf("</form", formStart);
+            if (formEnd < 0) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+        }
+        if (formStart < 0) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+        Map<String, String> fields = new LinkedHashMap<>();
+        boolean user = false, password = false;
+        tags = TAG.matcher(document); tags.region(formStart, formEnd);
+        while (tags.find()) {
+            if ("form".equalsIgnoreCase(tags.group(1))) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+            Map<String, String> attr = attributes(tags.group(2));
             String name = attr.get("name"), type = attr.getOrDefault("type", "text");
             if (name == null) continue;
             if (USER_FIELD.equals(name)) {
-                if (!formSeen || tags.start() >= formEnd || user || !"text".equalsIgnoreCase(type)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+                if (user || !"text".equalsIgnoreCase(type)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
                 user = true;
             } else if (PASSWORD_FIELD.equals(name)) {
-                if (!formSeen || tags.start() >= formEnd || password || !"password".equalsIgnoreCase(type)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+                if (password || !"password".equalsIgnoreCase(type)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
                 password = true;
             } else if (REQUIRED.contains(name) || OPTIONAL.contains(name)) {
-                if (!formSeen || tags.start() >= formEnd || !"hidden".equalsIgnoreCase(type) || fields.containsKey(name)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+                if (!"hidden".equalsIgnoreCase(type) || fields.containsKey(name)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
                 String value = attr.getOrDefault("value", "");
                 if (value.length() > 131_072) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
                 fields.put(name, value);
             }
         }
-        if (!formSeen || !user || !password || !fields.keySet().containsAll(REQUIRED)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
-        for (String required : REQUIRED) if (!"__VIEWSTATEENCRYPTED".equals(required) && fields.get(required).isEmpty())
-            throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+        if (!user || !password || !fields.keySet().containsAll(REQUIRED)) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
+        for (String required : REQUIRED) if (fields.get(required).isEmpty()) throw new Failure(Status.UNSUPPORTED, Reason.FORM);
         fields.putIfAbsent("__EVENTTARGET", ""); fields.putIfAbsent("__EVENTARGUMENT", "");
         fields.put("IsFromNewSite", "1");
         // The official LoginForm.js sets this immediately before its cross-page Default.aspx POST.
