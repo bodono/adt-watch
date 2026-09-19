@@ -118,15 +118,24 @@ public final class ToggleServiceTest {
         assertEquals(0, clicks);
     }
 
+    @Test public void tapInsideTheReuseWindowSkipsTheExtraRead() {
+        int before = queryCalls;
+        Intent start = queue();
+        assertNotNull(start);
+        assertEquals("A read from moments ago is reused for the preflight", before, queryCalls);
+    }
+
     @Test public void staleTapRefreshesFromAdtAndAlreadySatisfiedActionsNeverStartAHost() {
         int before = queryCalls;
         queryResult = report(AlarmStateProtocol.State.ARMED_STAY);
+        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertEquals(before + 1, queryCalls);
         assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
         revision = PhoneAlarmState.snapshot(context).revision;
         queryResult = report(AlarmStateProtocol.State.DISARMED);
+        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.DISARM, revision));
         noStart();
         assertEquals(before + 2, queryCalls);
@@ -145,6 +154,7 @@ public final class ToggleServiceTest {
     @Test public void failedFreshReadCannotReusePreviouslyReadyStateToArm() {
         queryResult = new AdtPortalClient.Result(AdtPortalClient.Status.UNAVAILABLE,
             AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 10);
+        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
@@ -156,6 +166,7 @@ public final class ToggleServiceTest {
             RoutineAccess.disable(context);
             return report(AlarmStateProtocol.State.DISARMED);
         });
+        pastReuse();
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertEquals(0, clicks);
@@ -348,8 +359,9 @@ public final class ToggleServiceTest {
     private void fresh(AlarmStateProtocol.State state) {
         ShadowSystemClock.advanceBy(Duration.ofMillis(1));
         queryResult = report(state);
-        PhoneAlarmState.refresh(context);
+        PhoneAlarmState.refresh(context, 0);
     }
+    private void pastReuse() { ShadowSystemClock.advanceBy(Duration.ofMillis(PhoneAlarmState.REUSE_MS)); }
     private AdtPortalClient.Result report(AlarmStateProtocol.State state) {
         return new AdtPortalClient.Result(AdtPortalClient.Status.READY, state,
             "inert-system", "inert-partition", "Inert Home", "Inert System", 10);
