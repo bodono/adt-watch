@@ -40,7 +40,9 @@ same home controlled by both configured scene widgets.
 
 App/Tile status checks and **Refresh** ask the phone to query ADT. The colour
 comes from ADT's reported actual state; notification messages are only hints to
-refresh. Status observations expire after at most 60 seconds. Their age means
+refresh. Reads within a few seconds of each other share one result, and after
+a request the phone re-checks ADT every few seconds for up to 30 seconds.
+Status observations expire after at most 60 seconds. Their age means
 time since the query, not time since the alarm last changed. This is a backend
 status query, not a forced physical-panel poll. Wear OS controls Tile scheduling,
 so a new query on every swipe is not guaranteed.

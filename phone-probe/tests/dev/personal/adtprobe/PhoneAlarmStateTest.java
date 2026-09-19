@@ -107,6 +107,48 @@ public final class PhoneAlarmStateTest {
         assertFalse(current.pending); assertEquals("-", current.completedRequest);
         assertEquals("UNCONFIRMED", context.getSharedPreferences(PhoneAlarmState.PREFERENCES, 0).getString("outcome", ""));
     }
+    @Test public void readsInsideTheReuseWindowShareOneQueryAndAFailedReadIsNeverReused() {
+        bind(); PhoneAlarmState.Snapshot first = read();
+        advance(1_000);
+        PhoneAlarmState.Snapshot reused = PhoneAlarmState.refresh(context);
+        assertEquals("A read one second old is answered from the ledger", 1, queries);
+        assertEquals(first.observationId, reused.observationId);
+        assertEquals(AlarmStateProtocol.Availability.READY, reused.availability);
+        advance(PhoneAlarmState.REUSE_MS);
+        PhoneAlarmState.Snapshot renewed = PhoneAlarmState.refresh(context);
+        assertEquals("Past the window the phone reads ADT again", 2, queries);
+        assertNotEquals(first.observationId, renewed.observationId);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE); advance(1);
+        assertEquals(AlarmStateProtocol.Availability.OFFLINE, PhoneAlarmState.refresh(context, 0).availability);
+        assertEquals(3, queries);
+        answer = result(AlarmStateProtocol.State.DISARMED); advance(1);
+        assertEquals("A failed read is not reused; the next caller retries at once",
+            AlarmStateProtocol.Availability.READY, PhoneAlarmState.refresh(context).availability);
+        assertEquals(4, queries);
+    }
+    @Test public void aConfirmationReadMustHaveStartedAfterTheCommand() {
+        bind(); read();
+        long requestStarted = SystemClock.elapsedRealtime();
+        assertTrue(PhoneAlarmState.beginCommand(context, PhoneAlarmState.snapshot(context).revision, AlarmAction.ARM_STAY,
+            UUID.randomUUID().toString()));
+        advance(1_000);
+        PhoneAlarmState.refresh(context, PhoneAlarmState.REUSE_MS, requestStarted);
+        assertEquals("The preflight read predates the command, so the poll reads again", 2, queries);
+        advance(1_000);
+        PhoneAlarmState.refresh(context, PhoneAlarmState.REUSE_MS, requestStarted);
+        assertEquals("A post-command read younger than the window is reused", 2, queries);
+    }
+    @Test public void aPollPublishesOnlyWhenSomethingChanged() {
+        bind(); PhoneAlarmState.Snapshot first = read();
+        assertFalse(PhoneAlarmState.changed(first, PhoneAlarmState.snapshot(context)));
+        advance(1);
+        assertFalse("A renewed observation of the same state is not a change", PhoneAlarmState.changed(first, read()));
+        answer = result(AlarmStateProtocol.State.ARMED_STAY); advance(1);
+        assertTrue(PhoneAlarmState.changed(first, read()));
+        PhoneAlarmState.Snapshot armed = PhoneAlarmState.snapshot(context);
+        assertTrue(PhoneAlarmState.beginCommand(context, armed.revision, AlarmAction.DISARM, UUID.randomUUID().toString()));
+        assertTrue("Going pending is a change", PhoneAlarmState.changed(armed, PhoneAlarmState.snapshot(context)));
+    }
     @Test public void rebootAndOverdueCallbackRequireAnotherQuery() {
         bind(); read();
         Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 4);
@@ -115,7 +157,7 @@ public final class PhoneAlarmStateTest {
         assertEquals(AlarmStateProtocol.Availability.OFFLINE, read().availability);
     }
     private void bind() { assertTrue(AdtPortalSession.bind(context, "system-1", "partition-1")); }
-    private PhoneAlarmState.Snapshot read() { advance(1); return PhoneAlarmState.refresh(context); }
+    private PhoneAlarmState.Snapshot read() { advance(1); return PhoneAlarmState.refresh(context, 0); }
     private static void advance(long ms) { ShadowSystemClock.advanceBy(Duration.ofMillis(ms)); }
     private static AdtPortalClient.Result result(AlarmStateProtocol.State state) {
         return new AdtPortalClient.Result(AdtPortalClient.Status.READY, state, "system-1", "partition-1", "Fixture", "Panel", 1);
