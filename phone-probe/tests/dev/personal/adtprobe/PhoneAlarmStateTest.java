@@ -4,6 +4,8 @@ import android.content.Context;
 import android.os.SystemClock;
 import android.provider.Settings;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.junit.After;
 import org.junit.Before;
@@ -27,18 +29,23 @@ public final class PhoneAlarmStateTest {
     private PhoneAlarmState.Schedule oldSchedule;
     private AdtPortalClient.Result answer;
     private int queries;
+    private final List<ScheduledRead> scheduled = new ArrayList<>();
     @Before public void setup() {
         context = RuntimeEnvironment.getApplication();
         context.getSharedPreferences(PhoneAlarmState.PREFERENCES, 0).edit().clear().commit();
         context.getSharedPreferences("adt_portal_binding", 0).edit().clear().commit();
         Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 3);
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "storageFailed", false);
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
         oldQuery = PhoneAlarmState.queryOperation; oldSchedule = PhoneAlarmState.scheduleOperation;
         PhoneAlarmState.scheduleOperation = (action, delay) -> { };
         PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; return answer; };
         answer = result(AlarmStateProtocol.State.DISARMED);
     }
-    @After public void finish() { PhoneAlarmState.queryOperation = oldQuery; PhoneAlarmState.scheduleOperation = oldSchedule; }
+    @After public void finish() {
+        PhoneAlarmState.queryOperation = oldQuery; PhoneAlarmState.scheduleOperation = oldSchedule;
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
+    }
     @Test public void legacyManualOrNotificationCacheCannotSupplyState() {
         context.getSharedPreferences("reported_alarm_state", 0).edit().putString("state", "ARMED_STAY")
             .putString("evidence", "PHONE_CHECK").putLong("event_ms", System.currentTimeMillis()).commit();
@@ -187,9 +194,89 @@ public final class PhoneAlarmStateTest {
         advance(1_000);
         PhoneAlarmState.refresh(context, PhoneAlarmState.REUSE_MS, requestStarted);
         assertEquals("The preflight read predates the command, so the poll reads again", 2, queries);
-        advance(1_000);
+        advance(999);
         PhoneAlarmState.refresh(context, PhoneAlarmState.REUSE_MS, requestStarted);
-        assertEquals("A post-command read younger than the window is reused", 2, queries);
+        assertEquals("A post-command read younger than the short confirmation window is reused", 2, queries);
+        advance(1);
+        PhoneAlarmState.refresh(context, PhoneAlarmState.REUSE_MS, requestStarted);
+        assertEquals("A pending read is renewed at one second, before the steady cache expires", 3, queries);
+    }
+    @Test public void providerBusyUsesTheShortReuseWindowWithoutALocalCommand() {
+        bind();
+        answer = new AdtPortalClient.Result(AdtPortalClient.Status.BUSY, AlarmStateProtocol.State.DISARMED,
+            "system-1", "partition-1", "Fixture", "Panel", 1, 0, 1, true);
+        assertTrue(read().providerBusy);
+        assertFalse(PhoneAlarmState.snapshot(context).pending);
+        advance(999);
+        PhoneAlarmState.refresh(context);
+        assertEquals(1, queries);
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        advance(1);
+        PhoneAlarmState.Snapshot ready = PhoneAlarmState.refresh(context);
+        assertEquals("Provider progress is checked at one second", 2, queries);
+        assertEquals(AlarmStateProtocol.Availability.READY, ready.availability);
+        assertFalse(ready.providerBusy);
+        advance(2_999);
+        PhoneAlarmState.refresh(context);
+        assertEquals("A settled state retains the ordinary three-second reuse window", 2, queries);
+    }
+    @Test public void everyConfirmationPollCanSeeACompletedCommandWithoutSkippingAnInterval() {
+        bind(); PhoneAlarmState.Snapshot first = read();
+        captureSchedule();
+        String request = UUID.randomUUID().toString();
+        assertTrue(PhoneAlarmState.beginCommand(context, first.revision, AlarmAction.ARM_STAY, request));
+        assertEquals(1, scheduled.size());
+        runNext(1_000);
+        assertEquals(2, queries);
+        assertTrue(PhoneAlarmState.snapshot(context).pending);
+        assertEquals(1, scheduled.size());
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        runNext(1_000);
+        assertEquals("The next poll does not reuse the still-pending result", 3, queries);
+        assertEquals(request, PhoneAlarmState.snapshot(context).completedRequest);
+        assertFalse(PhoneAlarmState.snapshot(context).pending);
+        assertTrue("Confirmation stops the polling burst", scheduled.isEmpty());
+    }
+    @Test public void queuedNotificationHintsCoalesceIntoOneImmediateRead() {
+        bind(); captureSchedule();
+        for (int i = 0; i < 10; i++) PhoneAlarmState.hint(context);
+        assertEquals("Only one read is queued before it starts", 1, scheduled.size());
+        runNext(0);
+        assertEquals(1, queries);
+        assertTrue(scheduled.isEmpty());
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+    }
+    @Test public void notificationsDuringAReadPreserveOneTrailingFreshRead() {
+        bind(); captureSchedule();
+        PhoneAlarmState.queryOperation = (app, deadline) -> {
+            queries++;
+            if (queries == 1) {
+                // The first backend response was sampled before these newer events arrived.
+                for (int i = 0; i < 10; i++) PhoneAlarmState.hint(app);
+                return result(AlarmStateProtocol.State.DISARMED);
+            }
+            return result(AlarmStateProtocol.State.ARMED_STAY);
+        };
+        PhoneAlarmState.hint(context);
+        runNext(0);
+        assertEquals(1, queries);
+        assertEquals(AlarmStateProtocol.State.DISARMED, PhoneAlarmState.snapshot(context).state);
+        assertEquals("Many in-flight hints preserve exactly one trailing read", 1, scheduled.size());
+        advance(1);
+        runNext(0);
+        assertEquals("The trailing hint cannot reuse the earlier notification's response", 2, queries);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
+        assertTrue("No timer remains without another hint", scheduled.isEmpty());
+    }
+    @Test public void failedHintSchedulingDoesNotSuppressLaterNotifications() {
+        bind();
+        PhoneAlarmState.scheduleOperation = (action, delay) -> { throw new IllegalStateException("inert failure"); };
+        PhoneAlarmState.hint(context);
+        captureSchedule();
+        PhoneAlarmState.hint(context);
+        assertEquals(1, scheduled.size());
+        runNext(0);
+        assertEquals(1, queries);
     }
     @Test public void aPollPublishesOnlyWhenSomethingChanged() {
         bind(); PhoneAlarmState.Snapshot first = read();
@@ -210,6 +297,20 @@ public final class PhoneAlarmStateTest {
         assertEquals(AlarmStateProtocol.Availability.OFFLINE, read().availability);
     }
     private void bind() { assertTrue(AdtPortalSession.bind(context, "system-1", "partition-1")); }
+    private void captureSchedule() {
+        PhoneAlarmState.scheduleOperation = (action, delay) -> scheduled.add(new ScheduledRead(action, delay));
+    }
+    private void runNext(long expectedDelay) {
+        ScheduledRead next = scheduled.remove(0);
+        assertEquals(expectedDelay, next.delay);
+        advance(expectedDelay);
+        next.action.run();
+    }
+    private static final class ScheduledRead {
+        final Runnable action;
+        final long delay;
+        ScheduledRead(Runnable action, long delay) { this.action = action; this.delay = delay; }
+    }
     private PhoneAlarmState.Snapshot read() { advance(1); return PhoneAlarmState.refresh(context, 0); }
     private static void advance(long ms) { ShadowSystemClock.advanceBy(Duration.ofMillis(ms)); }
     private static AdtPortalClient.Result result(AlarmStateProtocol.State state) {

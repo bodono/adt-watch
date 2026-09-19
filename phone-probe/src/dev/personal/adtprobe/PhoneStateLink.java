@@ -1,6 +1,8 @@
 package dev.personal.adtprobe;
 
 import android.content.Context;
+import android.os.SystemClock;
+import android.util.Log;
 import com.google.android.gms.tasks.Tasks;
 import com.google.android.gms.wearable.Wearable;
 import java.util.concurrent.TimeUnit;
@@ -21,6 +23,7 @@ final class PhoneStateLink {
             if (!RoutineAccess.stillValid(context, access)) return;
             report = report(context, request);
         }
+        Log.i("AdtPhoneStatus", SystemClock.elapsedRealtime() + " REPLY availability=" + report.availability.name());
         try {
             // Called on WearableListenerService's worker, not the UI thread.
             Tasks.await(Wearable.getMessageClient(context).sendMessage(source,
@@ -31,8 +34,12 @@ final class PhoneStateLink {
     static void publish(Context context) {
         RoutineAccess.Snapshot access = RoutineAccess.snapshot(context);
         if (access == null) return;
-        try { Wearable.getMessageClient(context).sendMessage(access.nodeId,
-            AlarmStateProtocol.STATE_PATH, report(context, "-").encode()); }
+        try {
+            AlarmStateProtocol.Report report = report(context, "-");
+            Log.i("AdtPhoneStatus", SystemClock.elapsedRealtime() + " PUBLISH availability=" + report.availability.name());
+            Wearable.getMessageClient(context).sendMessage(access.nodeId,
+                AlarmStateProtocol.STATE_PATH, report.encode());
+        }
         catch (RuntimeException ignored) { /* A later explicit query can recover state. */ }
     }
     private static AlarmStateProtocol.Report report(Context context, String request) {

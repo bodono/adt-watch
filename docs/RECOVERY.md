@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide describes v0.24, whose live-query integration is undergoing
+This guide describes v0.25, whose live-query integration is undergoing
 validation. Rebuilding the apps does not recreate their private device setup.
 The owner completes native widget consent, watch association, routine approval
 and both ADT sign-ins on their devices.
@@ -84,7 +84,7 @@ adb -d install -r build/phone-probe.apk
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
 builds at the same version and signature. Update the watch first, then the phone.
-Both apps need v0.24 for live-query observation identity and freshness handling.
+Both apps need v0.25 for live-query observation identity and freshness handling.
 After updating an earlier installation, complete the new website sign-in and
 explicit system selection below; existing native ADT sign-in is not enough.
 An existing sign-in and system selection in this helper are retained by an
@@ -195,7 +195,7 @@ controls without waiting for a notification; the earlier uncertain request is
 not automatically repeated. Native ADT work already queued can execute later.
 
 Earlier native-widget cycles worked with the phone locked and ADT set to
-Unrestricted. v0.24 live queries, session longevity and reliable overnight use
+Unrestricted. v0.25 live queries, session longevity and reliable overnight use
 still require physical verification.
 
 ## Optional automatic login
@@ -241,7 +241,7 @@ including account details.
   an HTTP status when available. Share that code when reporting a problem;
   it contains no account details. For example, `IDENTITIES/RESPONSE_SIZE/200`
   means the account-discovery response exceeded the supported size, rather
-  than a failed password. v0.24 increases that discovery limit. A timeout or
+  than a failed password. The discovery limit is 4 MiB. A timeout or
   server error can be retried with **Check live status**; signing in again is
   needed when the screen specifically requests sign-in or verification.
 - **More than one system/partition or an unsupported response:** this version

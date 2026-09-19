@@ -1,6 +1,6 @@
 # How ADT Watch works
 
-The v0.24 architecture separates status queries from alarm execution. The phone
+The v0.25 architecture separates status queries from alarm execution. The phone
 and Wear modules share application ID `dev.personal.adtprobe` and a signing
 identity. Google Play Services carries bounded, source-matched messages between
 them. Live-query integration is undergoing validation.
@@ -132,8 +132,12 @@ The helper cannot recall work handed to ADT and never retries an alarm command.
 
 The ledger stores actual state separately from command outcome. A steady target
 state from a query started after dispatch can confirm the pending request. The
-phone polls for that every 2.5 seconds for up to 30 seconds, reuses any read
-younger than three seconds that began after dispatch, and tells the watch only
+phone polls for that one second after each completed check for up to 30 seconds.
+While a request is pending or ADT reports busy, shared reads must be less than
+one second old; steady-state reads retain the three-second reuse window. A
+confirmation read must have begun after dispatch. ADT notification hints queue
+an immediate fresh read, with one coalesced follow-up if another hint arrives
+during that read, so the later event is not lost. The phone tells the watch
 when something changed; a caller that merely waited for another read in
 progress is answered from the ledger rather than recorded as a failure. A tap's
 preflight never reuses an earlier read; when its own read cannot complete, that
@@ -150,6 +154,9 @@ State reports carry both state revision and observation identity so a new query
 of an unchanged state is distinguishable from an old cache. A completed-request
 identity is attached only to a qualifying observation. Message delivery alone,
 an unsolicited hint or a native widget invocation cannot manufacture state.
+A delayed READY hint for the exact observation already accepted in a correlated
+reply is ignored while that observation remains fresh: it cannot hide the
+confirmed control or extend its lifetime. Other hints still prompt verification.
 
 App/Tile loading, Refresh, update hints and completed attempts start bounded
 read-only status checks. Status retries contain no alarm command. The Tile
@@ -170,7 +177,7 @@ coloured control.
 Pure and Robolectric tests use invented HTTP responses, inert widgets and
 simulated lifecycle events. They do not contact ADT or operate an alarm.
 Earlier personal-device checks verified the native widget route with a locked
-phone and ADT battery usage Unrestricted. They do not establish v0.24 live-query
+phone and ADT battery usage Unrestricted. They do not establish v0.25 live-query
 compatibility, session longevity or reliable overnight operation. Those require
 separate physical verification.
 
@@ -184,3 +191,7 @@ Setup failures have closed diagnostic codes containing only a request stage,
 error category and optional HTTP status. They never include cookies, URLs,
 account identifiers, response bodies or exception messages. Starting another
 check, a UI timeout or cancellation replaces the previous diagnostic.
+
+Status timing logs contain only elapsed times, closed state/status values and
+booleans. They distinguish notification arrival, live-query completion and
+watch delivery without notification text, account IDs, cookies or credentials.

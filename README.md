@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app on a paired Android phone. It is not affiliated with
 or supported by ADT or Alarm.com.
 
-The v0.24 integration uses a read-only ADT website query for status and native
+The v0.25 integration uses a read-only ADT website query for status and native
 ADT scene widgets for alarm requests. This version is being validated; earlier
 personal-device checks do not establish reliability of the new live-query flow.
 
@@ -52,8 +52,10 @@ sole partition.
 
 App/Tile status checks and **Refresh** ask the phone to query ADT. The colour
 comes from ADT's reported actual state; notification messages are only hints to
-refresh. Reads within a few seconds of each other share one result, and after
-a request the phone re-checks ADT every few seconds for up to 30 seconds.
+refresh. Steady-state reads within three seconds share one result. After a request, the
+phone re-checks ADT about once a second for up to 30 seconds, sharing only
+results less than a second old while the request or ADT remains busy. An ADT
+notification prompts an immediate fresh read; it never supplies the alarm state.
 Status observations expire after at most 60 seconds. Their age means
 time since the query, not time since the alarm last changed. This is a backend
 status query, not a forced physical-panel poll. Wear OS controls Tile scheduling,

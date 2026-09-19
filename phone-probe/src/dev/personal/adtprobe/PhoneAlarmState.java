@@ -6,6 +6,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.Log;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -13,7 +14,6 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 /** ADT's authenticated reported state is the only authority. Notifications are refresh hints. */
@@ -23,14 +23,18 @@ final class PhoneAlarmState {
     static final long COMMAND_CONFIRMATION_MILLIS = AdtLiveLedger.PENDING_LIMIT_MS;
     /** A successful read this recent is answered from the ledger instead of querying ADT again. */
     static final long REUSE_MS = 3_000;
+    /** Transitional observations must not hide a completed command behind the steady cache. */
+    static final long CONFIRMATION_REUSE_MS = 1_000;
     /** Interval between confirmation reads after a command; each is an authenticated portal read. */
-    static final long CONFIRMATION_POLL_MS = 2_500;
+    static final long CONFIRMATION_POLL_MS = 1_000;
     private static final long QUERY_MS = 8_000;
     private static final ReentrantLock QUERY_LOCK = new ReentrantLock();
     private static final ScheduledExecutorService READS = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "ADT status reads"); thread.setDaemon(true); return thread;
     });
-    private static final AtomicBoolean HINT_QUEUED = new AtomicBoolean();
+    private static final Object HINT_LOCK = new Object();
+    private static HintRead hintRead;
+    private static final class HintRead { boolean running, again; }
     interface Schedule { void after(Runnable action, long delayMillis); }
     static Schedule scheduleOperation = (action, delay) -> READS.schedule(action, delay, TimeUnit.MILLISECONDS);
     private static boolean storageFailed;
@@ -44,7 +48,7 @@ final class PhoneAlarmState {
         final long ageMillis;
         final AlarmStateProtocol.Availability availability;
         final AlarmStateProtocol.Evidence evidence = AlarmStateProtocol.Evidence.ADT_QUERY;
-        final boolean pending;
+        final boolean pending, providerBusy;
         /**
          * Only refresh sets this: true when that call completed, or shared, a successful read that
          * satisfies it; false for a passive snapshot, a lock wait that timed out or a read that
@@ -62,6 +66,7 @@ final class PhoneAlarmState {
             ageMillis = value == null ? 0 : value.observationAgeMillis;
             availability = failure != null ? failure : value.availability;
             pending = value != null && value.pending;
+            providerBusy = value != null && value.providerBusy;
         }
     }
 
@@ -117,15 +122,24 @@ final class PhoneAlarmState {
             synchronized (PhoneAlarmState.class) {
                 SharedPreferences stored = preferences(app);
                 long lastStarted = stored.getLong("lastQueryStarted", -1), now = SystemClock.elapsedRealtime();
+                AdtLiveLedger.Snapshot value = read(stored, binding).snapshot(now, boot(app));
+                long allowedReuse = value.pending || value.providerBusy
+                    ? Math.min(reuseMillis, CONFIRMATION_REUSE_MS) : reuseMillis;
                 if (binding.id.equals(stored.getString("bindingId", "")) && stored.getInt("lastQueryBoot", -1) == boot(app)
                         && lastReadSucceeded(stored) && (lastStarted >= arrived
-                            || lastStarted > notBeforeElapsed && now >= lastStarted && now - lastStarted < reuseMillis))
+                            || lastStarted > notBeforeElapsed && now >= lastStarted && now - lastStarted < allowedReuse))
                     return snapshot(app, true);
             }
             long started = SystemClock.elapsedRealtime();
             int queryBoot = boot(app);
+            diagnostic("QUERY_START");
             AdtPortalClient.Result result = queryOperation.query(app, deadline);
             long received = SystemClock.elapsedRealtime();
+            diagnostic("QUERY_RESULT durationMs=" + Math.max(0, received - started)
+                + " status=" + (result == null ? AdtPortalClient.Status.UNAVAILABLE : result.status).name()
+                + " state=" + (result == null ? AlarmStateProtocol.State.UNKNOWN : result.state).name()
+                + " providerBusy=" + (result != null && Boolean.TRUE.equals(result.loading))
+                + " pendingBefore=" + snapshot(app).pending);
             synchronized (PhoneAlarmState.class) {
                 if (!AdtPortalSession.valid(app, binding)) return snapshot(app);
                 if (result == null || received >= deadline || received < started || queryBoot != boot(app)) {
@@ -139,7 +153,10 @@ final class PhoneAlarmState {
                         started, received, queryBoot, Boolean.TRUE.equals(result.loading)))) {
                     failed(app, binding, AdtPortalClient.Status.UNSUPPORTED); return snapshot(app);
                 }
-                return snapshot(app, write(app, binding, ledger, result.status, started, queryBoot));
+                Snapshot recorded = snapshot(app, write(app, binding, ledger, result.status, started, queryBoot));
+                diagnostic("QUERY_STORED availability=" + recorded.availability.name()
+                    + " pending=" + recorded.pending + " providerBusy=" + recorded.providerBusy);
+                return recorded;
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt(); failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);
@@ -207,14 +224,48 @@ final class PhoneAlarmState {
     /** Notification contents never enter the ledger; a missed notification is recovered by a GET. */
     static void hint(Context context) {
         Context app = context.getApplicationContext();
-        if (AdtPortalSession.binding(app) == null || !HINT_QUEUED.compareAndSet(false, true)) return;
+        if (AdtPortalSession.binding(app) == null) return;
+        diagnostic("HINT_RECEIVED");
+        HintRead next;
+        synchronized (HINT_LOCK) {
+            if (hintRead != null) {
+                // A queued read already starts after this hint. A running read may have sampled
+                // ADT before it, so preserve one trailing read, however many hints arrive.
+                if (hintRead.running) hintRead.again = true;
+                return;
+            }
+            hintRead = next = new HintRead();
+        }
+        scheduleHintRead(app, next);
+    }
+
+    private static void scheduleHintRead(Context app, HintRead expected) {
         try {
             scheduleOperation.after(() -> {
+                synchronized (HINT_LOCK) {
+                    if (hintRead != expected) return;
+                    expected.running = true;
+                    expected.again = false;
+                }
                 // A notification means the state probably just changed, so this read is not reused.
                 try { refresh(app, 0); PhoneStateLink.publish(app); }
-                finally { HINT_QUEUED.set(false); }
-            }, 500);
-        } catch (RuntimeException ignored) { HINT_QUEUED.set(false); }
+                finally {
+                    boolean followUp;
+                    synchronized (HINT_LOCK) {
+                        followUp = hintRead == expected && expected.again;
+                        expected.running = false;
+                        if (hintRead == expected && !followUp) hintRead = null;
+                    }
+                    if (followUp) scheduleHintRead(app, expected);
+                }
+            }, 0);
+        } catch (RuntimeException ignored) {
+            synchronized (HINT_LOCK) { if (hintRead == expected) hintRead = null; }
+        }
+    }
+
+    private static void diagnostic(String event) {
+        Log.i("AdtPhoneStatus", SystemClock.elapsedRealtime() + " " + event);
     }
 
     static String setupStatus(Context context) {

@@ -381,6 +381,18 @@ final class WatchAlarmStore {
         if (!trusted(p, boot) || !source.equals(p.getString("source", ""))) return false;
         boolean answer = !"-".equals(report.request);
         if (!answer) {
+            // A publish can arrive after the correlated reply for that very observation. It
+            // conveys nothing new and must not hide the result just confirmed by the reply.
+            // Ignore it without extending freshness, contact time, tokens or command outcomes.
+            if (report.availability == AlarmStateProtocol.Availability.READY
+                    && availability(p) == AlarmStateProtocol.Availability.READY && fresh(p, now)
+                    && report.evidence == AlarmStateProtocol.Evidence.ADT_QUERY
+                    && report.observationId.equals(p.getString("observationId", ""))
+                    && report.revision.equals(p.getString("revision", "")) && report.state == state(p)
+                    && report.completedRequest.equals(p.getString("completedRequest", ""))) {
+                diagnostic("HINT_DUPLICATE_IGNORED");
+                return false;
+            }
             diagnostic("HINT_ACCEPT availability=" + report.availability.name());
             // An unsolicited report has no bounded round trip or ordered revision. It is a hint
             // to query, never freshness/ordering proof and never permission to clear a busy latch.

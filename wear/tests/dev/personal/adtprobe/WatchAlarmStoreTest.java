@@ -91,6 +91,33 @@ public final class WatchAlarmStoreTest {
         assertNull(WatchAlarmStore.consume(context, original.revision, AlarmAction.ARM_STAY));
     }
 
+    @Test public void lateHintForTheConfirmedObservationCannotHideItOrExtendItsLifetime() {
+        WatchAlarmStore.ViewState original = seed(10);
+        AlarmStateProtocol.Report hint = new AlarmStateProtocol.Report("-", AlarmStateProtocol.State.DISARMED,
+            AlarmStateProtocol.Availability.READY, R1, 0, "-", AlarmStateProtocol.Evidence.ADT_QUERY,
+            stored().getString("observationId", ""));
+        java.util.Map<String, ?> originalStorage = stored().getAll();
+        advance(1_000);
+        assertFalse("No new information: do not start another recovery", WatchAlarmStore.accept(context, PHONE, hint, now(), BOOT));
+        assertEquals(originalStorage, stored().getAll());
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        assertEquals(original.revision, WatchAlarmStore.read(context).revision);
+        advance(59_001);
+        assertFalse("A duplicate cannot extend the original observation", WatchAlarmStore.read(context).enabled);
+        assertTrue("Once stale, a hint may prompt a fresh query", WatchAlarmStore.accept(context, PHONE, hint, now(), BOOT));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+    }
+
+    @Test public void busyHintForTheSameObservationStillRevokesTheControl() {
+        seed(10);
+        AlarmStateProtocol.Report hint = new AlarmStateProtocol.Report("-", AlarmStateProtocol.State.DISARMED,
+            AlarmStateProtocol.Availability.BUSY, R1, 10, "-", AlarmStateProtocol.Evidence.ADT_QUERY,
+            stored().getString("observationId", ""));
+        assertTrue(WatchAlarmStore.accept(context, PHONE, hint, now(), BOOT));
+        assertFalse(WatchAlarmStore.read(context).enabled);
+        assertEquals("BUSY", stored().getString("availability", ""));
+    }
+
     @Test public void observationExpiresAndOnlyANewQueryObservationRenewsUnchangedState() {
         seed(AlarmStateProtocol.QUERY_FRESH_MS - 10);
         advance(11);
