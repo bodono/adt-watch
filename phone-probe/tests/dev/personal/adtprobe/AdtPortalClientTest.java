@@ -142,6 +142,25 @@ public final class AdtPortalClientTest {
         assertEquals("An origin outside the allow-list never reaches the transport", 1, transport.requests.size());
     }
 
+    @Test public void aReplacedOrCancelledSessionIsATransientFailureNotAnUnsupportedResponse() throws Exception {
+        AdtPortalClient.Session replaced = new AdtPortalClient.Session() {
+            @Override public String cookies() { throw new AdtPortalClient.SessionUnavailable("replaced"); }
+            @Override public String userAgent() { return "Inert-Agent/1"; }
+            @Override public void storeCookie(String value) { }
+        };
+        AdtPortalClient client = new AdtPortalClient(replaced, transport, clock);
+        AdtPortalClient.Result status = client.status(SYSTEM, PARTITION, clock.now + 5_000);
+        assertEquals(AdtPortalClient.Status.UNAVAILABLE, status.status);
+        assertEquals("SESSION/SESSION", status.diagnosticCode());
+        assertEquals(AdtPortalClient.Status.UNAVAILABLE, client.query(clock.now + 5_000).status);
+        assertEquals("Nothing reached the transport", 0, transport.requests.size());
+        AdtPortalSession.QuerySession cancelled = AdtPortalSession.cancellable(session);
+        cancelled.invalidate();
+        AdtPortalClient.Result late = new AdtPortalClient(cancelled, transport, clock).status(SYSTEM, PARTITION, clock.now + 5_000);
+        assertEquals("A cancelled setup read is the same transient condition", "SESSION/SESSION", late.diagnosticCode());
+        assertEquals(AdtPortalClient.Status.UNAVAILABLE, late.status);
+    }
+
     @Test public void desiredStateIsNeverReportedAsActualAndLoadingIsExplicitlyUncertain() throws Exception {
         enqueue(1, 2);
         AdtPortalClient.Result result = client.query(5_000);

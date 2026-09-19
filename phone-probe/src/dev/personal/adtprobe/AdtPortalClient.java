@@ -45,6 +45,14 @@ final class AdtPortalClient {
         /** The https origin whose cookie jar holds the sign-in; API paths are appended to it. */
         default String origin() { return ORIGIN; }
     }
+    /**
+     * A session wrapper throws this when its authentication is being replaced or its read was
+     * cancelled. That says nothing about ADT's response, so clients report it as a transient
+     * UNAVAILABLE that a later read retries, never as an unsupported response.
+     */
+    static final class SessionUnavailable extends IllegalStateException {
+        SessionUnavailable(String message) { super(message); }
+    }
     enum Status { READY, BUSY, LOGIN_REQUIRED, VERIFY_LOGIN, UNAVAILABLE, UNSUPPORTED, AMBIGUOUS }
     enum Stage { SESSION, IDENTITIES, SYSTEM, PARTITION }
     enum Reason { NONE, HTTP, TIMEOUT, DNS, TLS, IO, SCHEMA, RESPONSE_SIZE, COOKIE_FORMAT, SESSION, EMPTY_RESPONSE, CONTENT_TYPE }
@@ -186,6 +194,8 @@ final class AdtPortalClient {
                 diagnostic.http = ((PortalIOException) failure).http;
             }
             return failed(Status.UNAVAILABLE, started, diagnostic, reason);
+        } catch (SessionUnavailable ignored) {
+            return failed(Status.UNAVAILABLE, started, diagnostic, Reason.SESSION);
         } catch (JSONException | RuntimeException ignored) {
             // Response bodies, server errors, headers and exception text never reach logs or the caller.
             return failed(Status.UNSUPPORTED, started, diagnostic, Reason.SCHEMA);
@@ -230,6 +240,8 @@ final class AdtPortalClient {
                 diagnostic.http = ((PortalIOException) failure).http;
             }
             return failed(Status.UNAVAILABLE, started, diagnostic, reason);
+        } catch (SessionUnavailable ignored) {
+            return failed(Status.UNAVAILABLE, started, diagnostic, Reason.SESSION);
         } catch (JSONException | RuntimeException ignored) {
             return failed(Status.UNSUPPORTED, started, diagnostic, Reason.SCHEMA);
         } finally {

@@ -27,7 +27,7 @@ final class AdtPortalSession {
         private QuerySession(AdtPortalClient.Session delegate) { this.delegate = delegate; }
         synchronized void invalidate() { active = false; }
         private void requireActive() {
-            if (!active) throw new IllegalStateException("ADT status check cancelled");
+            if (!active) throw new AdtPortalClient.SessionUnavailable("ADT status check cancelled");
         }
         @Override public synchronized String cookies() { requireActive(); return delegate.cookies(); }
         @Override public synchronized String cookies(String url) { requireActive(); return delegate.cookies(url); }
