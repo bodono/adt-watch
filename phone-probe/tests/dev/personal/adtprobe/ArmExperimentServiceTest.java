@@ -3,15 +3,25 @@ package dev.personal.adtprobe;
 import android.app.Activity;
 import android.app.Application;
 import android.app.KeyguardManager;
+import android.app.Notification;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.os.Looper;
+import android.os.Process;
+import android.service.notification.StatusBarNotification;
 import android.view.View;
 import com.google.android.gms.wearable.MessageEvent;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Locale;
+import java.util.UUID;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -33,7 +43,7 @@ import static org.junit.Assert.*;
  * The sole fixture write supplies SDK35's missing window-visibility state on its attached decor.
  */
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 35)
+@Config(sdk = 35, shadows = PhoneAlarmStateTest.PermissionShadow.class)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class ArmExperimentServiceTest {
     private static final String REQUEST = "12345678-1234-4234-8234-123456789abc";
@@ -43,9 +53,11 @@ public final class ArmExperimentServiceTest {
     private Activity owner;
     private ServiceController<ArmExperimentService> serviceController;
     private ArmExperimentService service;
+    private ArmExperimentService.NodeSource originalNodeSource;
 
     @Before public void cleanStart() {
         context = RuntimeEnvironment.getApplication();
+        originalNodeSource = ReflectionHelpers.getStaticField(ArmExperimentService.class, "nodeSource");
         ArmExperimentService.cancelForNavigation(context);
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         while (Shadows.shadowOf(context).getNextStartedService() != null) { }
@@ -54,6 +66,7 @@ public final class ArmExperimentServiceTest {
     }
 
     @After public void close() {
+        ReflectionHelpers.setStaticField(ArmExperimentService.class, "nodeSource", originalNodeSource);
         ArmExperimentService.cancelForNavigation(context);
         if (serviceController != null) serviceController.destroy();
         if (ownerController != null) ownerController.pause().stop().destroy();
@@ -245,6 +258,56 @@ public final class ArmExperimentServiceTest {
         assertEquals(Boolean.FALSE, member(disarmHost, "consumed"));
     }
 
+    @Test public void preparedExperimentAdoptsOneMatchingWatchTapAndItsStateRevision() throws Exception {
+        String revision = installReportedState("Disarmed");
+        // One inert connected node, delivered through the service's own executor like the real client.
+        ReflectionHelpers.setStaticField(ArmExperimentService.class, "nodeSource",
+            (ArmExperimentService.NodeSource) (ignored, executor, result) -> executor.execute(() -> result.accept(
+                java.util.Collections.singletonList(new com.google.android.gms.wearable.Node() {
+                    @Override public String getId() { return "local-test-watch"; }
+                    @Override public String getDisplayName() { return "Inert watch"; }
+                    @Override public boolean isNearby() { return true; }
+                }))));
+        queueGrant(AlarmAction.ARM_STAY, true);
+        createService();
+        assertEquals(Service.START_NOT_STICKY,
+            service.onStartCommand(new Intent(context, ArmExperimentService.class), 0, 1));
+        Object grant = observe(service, "grant");
+        assertNull(member(grant, "toggleRevision"));
+        ArmReadinessWait wait = (ArmReadinessWait) observe(service, "readinessWait");
+
+        String stale = UUID.randomUUID().toString();
+        ArmExperimentService.receive(context, message(AlarmStateProtocol.TOGGLE_PATH,
+            new AlarmStateProtocol.Tap(AlarmAction.ARM_STAY, stale, UUID.randomUUID().toString()).encode()));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertNull("A tap for a state the phone does not currently report is not adopted", member(grant, "toggleRevision"));
+        assertFalse(wait.hasRequest());
+        ArmExperimentService.receive(context, message(AlarmStateProtocol.TOGGLE_PATH,
+            new AlarmStateProtocol.Tap(AlarmAction.DISARM, stale, revision).encode()));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertNull("A tap for the other action is not adopted", member(grant, "toggleRevision"));
+        assertFalse(wait.hasRequest());
+
+        ArmExperimentService.receive(context, message(AlarmStateProtocol.TOGGLE_PATH,
+            new AlarmStateProtocol.Tap(AlarmAction.ARM_STAY, REQUEST, revision).encode()));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("The matching tap binds the session to the displayed state revision", revision, member(grant, "toggleRevision"));
+        assertEquals("local-test-watch", observe(service, "boundNode"));
+        assertTrue(ArmExperimentService.isRunning());
+        assertTrue(wait.hasRequest());
+        assertEquals(REQUEST, wait.requestId());
+        assertTrue(wait.matchesNode("local-test-watch"));
+        assertEquals(Boolean.FALSE, observe(service, "challengeIssued"));
+        assertEquals(-1L, observe(service, "dispatchElapsed"));
+
+        ArmExperimentService.receive(context, message(AlarmStateProtocol.TOGGLE_PATH,
+            new AlarmStateProtocol.Tap(AlarmAction.ARM_STAY, UUID.randomUUID().toString(), revision).encode()));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("A second tap cannot rebind an adopted session", REQUEST, wait.requestId());
+        assertEquals(revision, member(grant, "toggleRevision"));
+        assertTrue("Adoption consumes nothing until the final commit", PhoneAlarmState.matches(context, revision, AlarmAction.ARM_STAY));
+    }
+
     @Test public void contextualCommitNeverStartsOrResurrectsRoutineService() throws Exception {
         ArmExperimentService.receive(context, message(ArmExperimentProtocol.COMMIT_PATH,
             ArmExperimentProtocol.encodeCommit(AlarmAction.DISARM, REQUEST, CHALLENGE)));
@@ -263,6 +326,30 @@ public final class ArmExperimentServiceTest {
         assertNull(observe(null, "pending"));
         assertNull(observe(null, "active"));
         assertNull(Shadows.shadowOf(context).getNextStartedService());
+    }
+
+    /** Inert reported state so PhoneAlarmState.matches can succeed; mirrors the ToggleServiceTest fixture. */
+    private String installReportedState(String state) {
+        for (String name : new String[]{"connected", "reconciled", "connectionHasLatest", "storageFailed"})
+            ReflectionHelpers.setStaticField(PhoneAlarmState.class, name, false);
+        context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit().clear().commit();
+        PhoneAlarmStateTest.PermissionShadow.granted = true;
+        PackageInfo info = new PackageInfo(); info.packageName = PhoneAlarmState.ADT_PACKAGE; info.versionCode = 2307;
+        info.applicationInfo = new ApplicationInfo(); info.applicationInfo.packageName = info.packageName;
+        info.applicationInfo.enabled = true;
+        Shadows.shadowOf(context.getPackageManager()).installPackage(info);
+        long millis = System.currentTimeMillis() - 120_000;
+        String date = DateTimeFormatter.ofPattern("HH:mm 'on' dd/MM/uuuu", Locale.UK).withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(millis));
+        Notification notification = new Notification.Builder(context, "inert").setWhen(millis)
+            .setContentTitle("SYSTEM " + state + " (123456)")
+            .setContentText("Inert Home: SYSTEM was " + state + " at " + date + ". (123456)").build();
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{new StatusBarNotification(PhoneAlarmState.ADT_PACKAGE,
+            PhoneAlarmState.ADT_PACKAGE, 7, "inert", Process.myUid(), 0, 0, notification, Process.myUserHandle(), millis + 1000)});
+        PhoneAlarmState.Snapshot snapshot = PhoneAlarmState.snapshot(context);
+        assertEquals(AlarmStateProtocol.Availability.READY, snapshot.availability);
+        return snapshot.revision;
     }
 
     private Object startPassiveExperiment() throws Exception {
