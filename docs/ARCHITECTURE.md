@@ -77,7 +77,9 @@ therefore distinguishable from a phone that did not answer. Neither contact
 alone nor an unsolicited update clears a pending alarm action.
 
 Before native execution, the phone consumes the displayed state revision and
-records a pending result. A newer ADT state report is required to clear it.
+records a pending result. A newer ADT state report clears it; the owner can also
+clear it from the phone's main screen after checking ADT, which keeps the last
+accepted state, issues a new revision and never replays the consumed one.
 Neither a successful message send nor a widget invocation invents the opposite
 alarm state. Refresh asks for the phone's accepted report without an alarm action.
 

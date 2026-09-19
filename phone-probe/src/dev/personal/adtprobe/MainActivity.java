@@ -69,6 +69,16 @@ public final class MainActivity extends Activity {
         });
         text("Android's notification access lets this helper read ADT's alarm reports. It keeps only the reported state and timing. "
             + "Grey means no usable state report is available. The colour changes after ADT reports the result.", 15, Color.LTGRAY);
+        button("Clear pending request…", view -> new AlertDialog.Builder(this).setTitle("Clear stored request bookkeeping?")
+            .setMessage("Check the actual alarm state in ADT first. This clears the wait for a newer ADT report after the last "
+                + "watch request, and any conflicting-report lock. The last accepted ADT state is kept and nothing is sent to the alarm.")
+            .setNegativeButton("Keep waiting", null)
+            .setPositiveButton("I checked ADT — clear", (dialog, which) -> {
+                boolean cleared = PhoneAlarmState.resetBookkeeping(this);
+                Probe.event(this, cleared ? "Owner cleared pending/conflict bookkeeping; last accepted state kept."
+                    : "Owner reset of pending/conflict bookkeeping could not be saved.");
+                alarmStatus.setText(cleared ? PhoneAlarmState.setupStatus(this) : "The stored bookkeeping could not be cleared.");
+            }).show());
         button("Watch control access…", view ->
             startActivity(new Intent(this, RoutineSetupActivity.class)));
         button("Open ADT", view -> {

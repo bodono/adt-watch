@@ -183,7 +183,11 @@ reliable overnight operation and broader compatibility remain unverified.
 - **Grey or uncertain after a tap:** do not repeat it. Check the actual alarm
   state in ADT. Work already queued inside ADT can execute when background
   restrictions lift or ADT opens; the helper cannot recall it. A new ADT state
-  report is needed before offering another coloured action.
+  report is needed before offering another coloured action. If ADT already
+  shows the result and no newer report is coming (a report from before your
+  request arrived late, or the command was redundant), tap **Clear pending
+  request…** on the phone's main screen after checking ADT. It keeps the last
+  accepted state and sends nothing to the alarm.
 - **Grey before any request:** check the phone connection, notification access,
   supported ADT version and availability of a recent, recognized ADT report.
   Refresh only reads status. Reopening ADT Watch alone does not send an alarm
@@ -191,7 +195,9 @@ reliable overnight operation and broader compatibility remain unverified.
 - **Disarm worked but Arm Stay remains grey:** the helper still needs an accepted
   Disarmed report. v0.20 retries read-only status checks briefly and distinguishes
   no phone reply from missing ADT status. Refresh starts another bounded status
-  check; it never resends Disarm or automatically arms the system.
+  check; it never resends Disarm or automatically arms the system. If ADT
+  confirms the system is disarmed but the phone still says it is waiting for a
+  newer report, use **Clear pending request…** on the phone.
 - **Changing either scene or widget:** first use **Watch control access… →
   Disable watch controls**. Review the complete scenes again, reconfigure the
   affected widget and repeat **Enable watch controls once…**. Widget setup

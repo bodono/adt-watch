@@ -160,6 +160,34 @@ public final class PhoneAlarmStateTest {
         assertEquals(AlarmStateProtocol.Availability.SETUP, PhoneAlarmState.snapshot(context).availability);
     }
 
+    @Test public void ownerResetClearsPendingAndConflictLatchesButCannotInventAState() {
+        long now = System.currentTimeMillis();
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{notification("Disarmed", now - 120_000)});
+        String consumed = PhoneAlarmState.snapshot(context).revision;
+        assertTrue(PhoneAlarmState.beginCommand(context, consumed, AlarmAction.ARM_STAY));
+        assertEquals(AlarmStateProtocol.Availability.BUSY, PhoneAlarmState.snapshot(context).availability);
+
+        assertTrue(PhoneAlarmState.resetBookkeeping(context));
+        PhoneAlarmState.Snapshot cleared = PhoneAlarmState.snapshot(context);
+        assertEquals(AlarmStateProtocol.Availability.READY, cleared.availability);
+        assertEquals("The last accepted state is kept", AlarmStateProtocol.State.DISARMED, cleared.state);
+        assertNotEquals("The consumed revision cannot be replayed", consumed, cleared.revision);
+        assertFalse(PhoneAlarmState.matches(context, consumed, AlarmAction.ARM_STAY));
+        assertTrue(PhoneAlarmState.matches(context, cleared.revision, AlarmAction.ARM_STAY));
+
+        PhoneAlarmState.posted(context, notification("Armed Stay", "Other Home", now - 60_000));
+        assertEquals("A second scope locks the state", AlarmStateProtocol.Availability.NO_STATE, PhoneAlarmState.snapshot(context).availability);
+        assertTrue(PhoneAlarmState.resetBookkeeping(context));
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(AlarmStateProtocol.State.DISARMED, PhoneAlarmState.snapshot(context).state);
+
+        context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit().clear().commit();
+        assertTrue(PhoneAlarmState.resetBookkeeping(context));
+        assertEquals("A reset cannot manufacture a report", AlarmStateProtocol.Availability.NO_STATE,
+            PhoneAlarmState.snapshot(context).availability);
+    }
+
     @Test public void pendingAndPrivacySurviveReconnectWithoutRestoringConsumedAction() {
         long eventTime = System.currentTimeMillis() - 120_000;
         StatusBarNotification event = notification("Disarmed", eventTime);
@@ -186,9 +214,10 @@ public final class PhoneAlarmStateTest {
     private static PhoneAlarmState.Event parse(String state, String home, String account, long millis) {
         return PhoneAlarmState.parseText("SYSTEM " + state + " (" + account + ")", body(state, home, account, millis), millis, millis, UTC);
     }
-    private StatusBarNotification notification(String state, long millis) {
+    private StatusBarNotification notification(String state, long millis) { return notification(state, "Inert Home", millis); }
+    private StatusBarNotification notification(String state, String home, long millis) {
         Notification notification = new Notification.Builder(context, "inert")
-            .setContentTitle(title(state)).setContentText(body(state, "Inert Home", "123456", millis)).setWhen(millis).build();
+            .setContentTitle(title(state)).setContentText(body(state, home, "123456", millis)).setWhen(millis).build();
         return new StatusBarNotification(PhoneAlarmState.ADT_PACKAGE, PhoneAlarmState.ADT_PACKAGE, 7, "inert", Process.myUid(), 0, 0,
             notification, Process.myUserHandle(), millis + 1000);
     }

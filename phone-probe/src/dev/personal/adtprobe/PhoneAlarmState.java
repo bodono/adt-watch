@@ -71,6 +71,23 @@ final class PhoneAlarmState {
         return true;
     }
 
+    /**
+     * Owner-initiated escape from the two latches that otherwise wait for a newer ADT event: the
+     * pending request recorded by beginCommand, and a conflicting-report or second-scope lock. A
+     * delayed report from before the request, or a redundant command ADT never re-reports, can
+     * leave those set indefinitely. The last accepted state and its time are kept, so this cannot
+     * invent a state; the owner must check the actual alarm state in ADT first.
+     */
+    static synchronized boolean resetBookkeeping(Context context) {
+        Ledger ledger = read(context);
+        ledger.pendingAfter = 0; ledger.conflictMillis = 0;
+        if (ledger.ambiguous) { ledger.ambiguous = false; ledger.scope = ""; }
+        ledger.revise(); // The consumed revision can never authorize another command.
+        if (!write(context, ledger)) return false;
+        changed(context);
+        return true;
+    }
+
     static boolean permissionGranted(Context context) {
         try {
             NotificationManager manager = context.getSystemService(NotificationManager.class);
@@ -86,8 +103,10 @@ final class PhoneAlarmState {
             case SETUP: return "The supported ADT app version is required for state reports.";
             case OFFLINE: return "Waiting for the ADT notification listener to connect.";
             case STALE: return "The latest ADT state report is over 24 hours old. Check ADT.";
-            case BUSY: return "Waiting for a newer ADT state report after the last request.";
-            default: return "Alarm state is unknown. A clear ADT Armed or Disarmed notification is needed.";
+            case BUSY: return "Waiting for a newer ADT state report after the last request. If ADT already shows the result, "
+                + "use Clear pending request.";
+            default: return "Alarm state is unknown. A clear ADT Armed or Disarmed notification is needed; conflicting "
+                + "reports can be cleared with Clear pending request after checking ADT.";
         }
     }
 
