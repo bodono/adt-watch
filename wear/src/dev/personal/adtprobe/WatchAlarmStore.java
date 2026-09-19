@@ -133,8 +133,6 @@ final class WatchAlarmStore {
                     ? statusDetail(p, now, boot, true) : "Request in progress");
         }
         AlarmStateProtocol.Availability availability = availability(p);
-        if (availability == AlarmStateProtocol.Availability.UNCONFIRMED)
-            return neutral("Result unconfirmed", "Check ADT on your phone");
         if (!trusted(p, boot) || !fresh(p, now) || availability != AlarmStateProtocol.Availability.READY)
             return neutral("State unknown", statusDetail(p, now, boot, false));
         long age = age(p, now);
@@ -319,8 +317,7 @@ final class WatchAlarmStore {
         if (recovery == null) return;
         AlarmStateProtocol.Availability status = availability(prefs(context));
         if (actionable || status == AlarmStateProtocol.Availability.NO_ACCESS
-                || status == AlarmStateProtocol.Availability.SETUP || status == AlarmStateProtocol.Availability.STALE
-                || status == AlarmStateProtocol.Availability.UNCONFIRMED) {
+                || status == AlarmStateProtocol.Availability.SETUP || status == AlarmStateProtocol.Availability.STALE) {
             cancelRecovery();
         } else if (recovery != null && recovery.finalStarted >= 0) cancelRecovery();
         else scheduleRefresh(context.getApplicationContext(), recovery, THROTTLE_MS);
@@ -583,10 +580,14 @@ final class WatchAlarmStore {
         return roundTrip >= 0 && roundTrip < sinceCommit && report.ageMillis < sinceCommit - roundTrip;
     }
 
+    /**
+     * The 30-second confirmation window runs from the recorded COMMIT, like the recovery's final
+     * read and the phone's own pending limit; a slow preflight before the challenge no longer eats
+     * into it. Without a commit record it runs from the tap, and without either it has passed.
+     */
     private static boolean unconfirmed(SharedPreferences p, long now, int boot) {
-        long started = p.getLong("actionStarted", -1);
-        return availability(p) == AlarmStateProtocol.Availability.UNCONFIRMED || !trusted(p, boot)
-                || started < 0 || now < started || now - started >= RECOVERY_MS;
+        long started = p.getLong(hasCommitOrigin(p, now, boot) ? "commitStarted" : "actionStarted", -1);
+        return !trusted(p, boot) || started < 0 || now < started || now - started >= RECOVERY_MS;
     }
 
     private static synchronized void failQuery(Context context, Query query) {
@@ -650,7 +651,6 @@ final class WatchAlarmStore {
             case NO_ACCESS: return "Sign in to ADT on your phone";
             case SETUP: return "Finish alarm setup on your phone";
             case BUSY: return "Phone reached; waiting for ADT";
-            case UNCONFIRMED: return "Result unconfirmed; check ADT on your phone";
             case STALE: return "An up-to-date ADT report is needed";
             case NO_STATE: return "Phone reached; no ADT report";
             case OFFLINE: return "Phone reached; ADT status unavailable";

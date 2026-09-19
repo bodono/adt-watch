@@ -111,7 +111,7 @@ public final class AlarmStateProtocolTest {
         assertEquals(legacy.request, upgraded.request);
         assertEquals(legacy.revision, upgraded.revision);
         assertEquals("-", AlarmStateProtocol.parseReport(new AlarmStateProtocol.Report("-",
-            AlarmStateProtocol.State.UNKNOWN, AlarmStateProtocol.Availability.UNCONFIRMED, "-", 0).encode()).completedRequest);
+            AlarmStateProtocol.State.UNKNOWN, AlarmStateProtocol.Availability.OFFLINE, "-", 0).encode()).completedRequest);
     }
 
     @Test public void reportMetadataRequiresTheExactSchemaAndACanonicalCompletionIdentity() {
