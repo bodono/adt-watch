@@ -339,6 +339,31 @@ public final class WatchActivityFlowTest {
         }
     }
 
+    @Test public void aDeclineStaysReadableThroughTheRefreshAndClearsOnTheNextTap() {
+        report(AlarmStateProtocol.State.DISARMED);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
+                AlarmAction.ARM_STAY, selected.request, AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode());
+        stopQueryTransport();
+        assertNull(attempt());
+        assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+
+        // The status refresh that follows re-enables the button; the decline must survive it.
+        advance(2_001);
+        report(AlarmStateProtocol.State.DISARMED);
+        SharedPreferences.OnSharedPreferenceChangeListener changed = ReflectionHelpers.getField(activity, "changed");
+        changed.onSharedPreferenceChanged(stored(), "contactReceived");
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        render();
+        assertTrue(controls().alarmButton.isEnabled());
+        assertTrue("The decline stays readable after the refresh", controls().alarmButton.getText().toString().contains("Not sent"));
+        tap();
+        assertEquals("The next deliberate tap clears the notice and sends a fresh request", 2, sent.size());
+        assertFalse(controls().alarmButton.getText().toString().contains("Not sent"));
+    }
+
     @Test public void wrongSourceRequestOrActionRefusalCannotCancelTheActiveTap() {
         report(AlarmStateProtocol.State.ARMED_STAY);
         mount(new Intent(Intent.ACTION_MAIN), null, true);
