@@ -33,7 +33,7 @@ public final class AdtLiveLedger {
         public final AlarmStateProtocol.State state;
         public final AlarmStateProtocol.Availability availability;
         public final String revision, observationId, requestId, completedRequest;
-        public final long observationAgeMillis;
+        public final long observationAgeMillis, requestStartedElapsed;
         public final boolean fresh, providerBusy, pending, enabled;
         public final Outcome outcome;
         public final AlarmAction action;
@@ -47,6 +47,7 @@ public final class AdtLiveLedger {
             providerBusy = fresh && ledger.providerBusy;
             outcome = ledger.outcome; pending = outcome == Outcome.PENDING;
             requestId = ledger.requestId; completedRequest = ledger.completedRequest;
+            requestStartedElapsed = ledger.requestStartedElapsed;
             availability = !ledger.hasObservation ? AlarmStateProtocol.Availability.NO_STATE
                 : !fresh ? AlarmStateProtocol.Availability.STALE
                 : providerBusy || pending ? AlarmStateProtocol.Availability.BUSY

@@ -21,6 +21,10 @@ final class PhoneAlarmState {
     static final String ADT_PACKAGE = "com.adtuk.adtukalarm";
     static final String PREFERENCES = "live_adt_state";
     static final long COMMAND_CONFIRMATION_MILLIS = AdtLiveLedger.PENDING_LIMIT_MS;
+    /** A successful read this recent is answered from the ledger instead of querying ADT again. */
+    static final long REUSE_MS = 3_000;
+    /** Interval between confirmation reads after a command; each is an authenticated portal read. */
+    static final long CONFIRMATION_POLL_MS = 2_500;
     private static final long QUERY_MS = 8_000;
     private static final ReentrantLock QUERY_LOCK = new ReentrantLock();
     private static final ScheduledExecutorService READS = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -69,8 +73,19 @@ final class PhoneAlarmState {
         return new Snapshot(value, failure);
     }
 
-    /** Worker-only read. Concurrent requests share a read begun after their arrival where possible. */
-    static Snapshot refresh(Context context) {
+    /** Worker-only read that reuses a successful read younger than REUSE_MS. */
+    static Snapshot refresh(Context context) { return refresh(context, REUSE_MS, -1); }
+
+    /** Worker-only read; zero reuse forces a read unless one began after this call arrived. */
+    static Snapshot refresh(Context context, long reuseMillis) { return refresh(context, reuseMillis, -1); }
+
+    /**
+     * Worker-only read. A read that began after this call arrived is always shared. A successful
+     * read younger than reuseMillis that also began after notBeforeElapsed is reused, so the
+     * watch's retries, the confirmation poll and a tap's preflight do not each cost ADT a query.
+     * A failed read is never reused: the next caller tries again.
+     */
+    static Snapshot refresh(Context context, long reuseMillis, long notBeforeElapsed) {
         Context app = context.getApplicationContext();
         AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
         if (binding == null) return snapshot(app);
@@ -78,12 +93,16 @@ final class PhoneAlarmState {
         boolean locked = false;
         try {
             locked = QUERY_LOCK.tryLock(QUERY_MS, TimeUnit.MILLISECONDS);
-            if (!locked) { failed(app, binding, AdtPortalClient.Status.UNAVAILABLE); return snapshot(app); }
+            // Another caller's read held the lock the whole time. That says nothing about ADT, so
+            // do not record a failure that would turn a fresh observation OFFLINE for everyone.
+            if (!locked) return snapshot(app);
             synchronized (PhoneAlarmState.class) {
                 SharedPreferences stored = preferences(app);
-                if (binding.id.equals(stored.getString("bindingId", ""))
-                        && stored.getLong("lastQueryStarted", -1) >= arrived
-                        && stored.getInt("lastQueryBoot", -1) == boot(app)) return snapshot(app);
+                long lastStarted = stored.getLong("lastQueryStarted", -1), now = SystemClock.elapsedRealtime();
+                if (binding.id.equals(stored.getString("bindingId", "")) && stored.getInt("lastQueryBoot", -1) == boot(app)
+                        && lastReadSucceeded(stored) && (lastStarted >= arrived
+                            || lastStarted > notBeforeElapsed && now >= lastStarted && now - lastStarted < reuseMillis))
+                    return snapshot(app);
             }
             long started = SystemClock.elapsedRealtime();
             int queryBoot = boot(app);
@@ -143,14 +162,29 @@ final class PhoneAlarmState {
             // These are GETs only. Never retry a scene or infer its success from dispatch.
             AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
             if (binding == null) return;
+            long requestStarted;
             synchronized (PhoneAlarmState.class) {
                 AdtLiveLedger.Snapshot value = read(preferences(app), binding).snapshot(SystemClock.elapsedRealtime(), boot(app));
                 if (!request.equals(value.requestId)) return;
+                requestStarted = value.requestStartedElapsed;
             }
-            Snapshot value = refresh(app);
-            PhoneStateLink.publish(app);
+            // Only a read begun after the request can confirm it; a recent one from the watch's
+            // own query is reused. The watch polls on its own, so a hint goes out only on change.
+            Snapshot before = snapshot(app);
+            Snapshot value = refresh(app, REUSE_MS, requestStarted);
+            if (changed(before, value)) PhoneStateLink.publish(app);
             if (value.pending && SystemClock.elapsedRealtime() < deadline) scheduleResultRead(app, request, deadline);
-        }, 1_000);
+        }, CONFIRMATION_POLL_MS);
+    }
+
+    static boolean changed(Snapshot before, Snapshot after) {
+        return before.state != after.state || before.availability != after.availability || before.pending != after.pending
+            || !before.revision.equals(after.revision) || !before.completedRequest.equals(after.completedRequest);
+    }
+
+    private static boolean lastReadSucceeded(SharedPreferences stored) {
+        String status = stored.getString("queryStatus", "");
+        return "READY".equals(status) || "BUSY".equals(status);
     }
 
     /** Notification contents never enter the ledger; a missed notification is recovered by a GET. */
@@ -159,7 +193,8 @@ final class PhoneAlarmState {
         if (AdtPortalSession.binding(app) == null || !HINT_QUEUED.compareAndSet(false, true)) return;
         try {
             scheduleOperation.after(() -> {
-                try { refresh(app); PhoneStateLink.publish(app); }
+                // A notification means the state probably just changed, so this read is not reused.
+                try { refresh(app, 0); PhoneStateLink.publish(app); }
                 finally { HINT_QUEUED.set(false); }
             }, 500);
         } catch (RuntimeException ignored) { HINT_QUEUED.set(false); }
