@@ -58,6 +58,32 @@ public final class WatchStatusRecoveryTest {
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "scheduledRefresh", null);
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "lastRefresh", -1L);
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "activeSelection", null);
+        ReflectionHelpers.setStaticField(WatchAlarmStore.class, "lastDelivery", null);
+    }
+
+    @Test public void duplicateDeliveryOfOneHintCannotOrphanTheQueryTheFirstCopyStarted() {
+        refresh(); connect(0);
+        push(PHONE, AlarmStateProtocol.State.DISARMED, R1);
+        advance(250); connect(1);
+        assertEquals(2, transport.queries.size());
+        push(PHONE, AlarmStateProtocol.State.DISARMED, R1);
+        assertTrue("The second copy of the same hint must not discard the in-flight query",
+                answer(1, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R1, 0));
+        assertTrue(WatchAlarmStore.read(context).enabled);
+        advance(2_000);
+        assertEquals("The duplicate schedules no query of its own", 2, transport.queries.size());
+    }
+
+    @Test public void aDifferentHintInsideTheDuplicateWindowIsStillProcessed() {
+        refresh(); connect(0);
+        push(PHONE, AlarmStateProtocol.State.DISARMED, R1);
+        advance(250); connect(1);
+        push(PHONE, AlarmStateProtocol.State.DISARMED, R2);
+        assertFalse("A changed hint still invalidates the in-flight answer",
+                answer(1, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R1, 0));
+        advance(250); connect(2);
+        assertTrue(answer(2, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R2, 0));
+        assertTrue(WatchAlarmStore.read(context).enabled);
     }
 
     @Test public void failedDiscoveryRecoversWithoutAnotherTapAndStopsAfterReady() {

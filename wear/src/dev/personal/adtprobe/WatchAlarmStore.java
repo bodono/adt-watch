@@ -12,6 +12,7 @@ import com.google.android.gms.wearable.CapabilityClient;
 import com.google.android.gms.wearable.MessageEvent;
 import com.google.android.gms.wearable.Node;
 import com.google.android.gms.wearable.Wearable;
+import java.util.Arrays;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -25,6 +26,7 @@ final class WatchAlarmStore {
     private static final long RECOVERY_MS = 30_000;
     private static final long PASSIVE_FRESH_MS = 45_000;
     private static final long PASSIVE_COOLDOWN_MS = 60_000;
+    private static final long DUPLICATE_DELIVERY_MS = 2_000;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static Query pending;
     private static long lastRefresh = -1;
@@ -32,6 +34,9 @@ final class WatchAlarmStore {
     private static ScheduledRefresh scheduledRefresh;
     private static Selection activeSelection;
     private static Recovery recovery;
+    private static byte[] lastDelivery;
+    private static String lastDeliverySource;
+    private static long lastDeliveryAt = -1;
 
     /** Status transport cannot carry an alarm command. Replaced with inert callbacks in tests. */
     interface StatusTransport {
@@ -287,14 +292,30 @@ final class WatchAlarmStore {
 
     static void receive(Context context, MessageEvent event) {
         if (event == null || !AlarmStateProtocol.STATE_PATH.equals(event.getPath())) return;
-        AlarmStateProtocol.Report report = AlarmStateProtocol.parseReport(event.getData());
+        byte[] data = event.getData();
+        AlarmStateProtocol.Report report = AlarmStateProtocol.parseReport(data);
         String source = event.getSourceNodeId();
         if (report == null || !WatchProtocol.validNodeId(source)) return;
+        if (duplicateDelivery(source, data, SystemClock.elapsedRealtime())) return;
         Context app = context.getApplicationContext();
         MAIN.post(() -> {
             if (accept(app, source, report, SystemClock.elapsedRealtime(), boot(app)) && "-".equals(report.request))
                 startRecovery(app, true);
         });
+    }
+
+    /**
+     * Play Services delivers a message both to WatchStateListener and to the Activity's live
+     * MessageClient listener while the app is open. A second copy of an answer is already
+     * rejected by the nonce bookkeeping, but a second copy of a hint would discard the query
+     * the first copy just issued and cost another round trip, so identical copies are dropped.
+     */
+    private static synchronized boolean duplicateDelivery(String source, byte[] data, long now) {
+        boolean duplicate = lastDelivery != null && source.equals(lastDeliverySource)
+                && Arrays.equals(data, lastDelivery) && now >= lastDeliveryAt && now - lastDeliveryAt < DUPLICATE_DELIVERY_MS;
+        if (duplicate) { diagnostic("DUPLICATE_DELIVERY"); return true; }
+        lastDelivery = data.clone(); lastDeliverySource = source; lastDeliveryAt = now;
+        return false;
     }
 
     /** The same production admission path is exercised with inert reports in local tests. */
