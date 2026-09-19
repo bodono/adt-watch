@@ -64,7 +64,7 @@ public final class ToggleServiceTest {
         ArmExperimentService.cancelForNavigation(context); idle();
         while (Shadows.shadowOf(context).getNextStartedService() != null) { }
         RoutineAccessTest.installValidConfiguration(context);
-        for (String name : new String[]{"connected", "reconciled", "connectionHasLatest", "storageFailed"})
+        for (String name : new String[]{"connected", "reconciled", "storageFailed"})
             ReflectionHelpers.setStaticField(PhoneAlarmState.class, name, false);
         context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit().clear().commit();
         PhoneAlarmStateTest.PermissionShadow.granted = true;

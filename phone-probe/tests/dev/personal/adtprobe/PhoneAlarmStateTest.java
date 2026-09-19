@@ -38,7 +38,7 @@ public final class PhoneAlarmStateTest {
     @Before public void setup() {
         context = RuntimeEnvironment.getApplication();
         oldZone = TimeZone.getDefault(); TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
-        for (String name : new String[]{"connected", "reconciled", "connectionHasLatest", "storageFailed"})
+        for (String name : new String[]{"connected", "reconciled", "storageFailed"})
             ReflectionHelpers.setStaticField(PhoneAlarmState.class, name, false);
         context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit().clear().commit();
         PermissionShadow.granted = true;
@@ -96,11 +96,11 @@ public final class PhoneAlarmStateTest {
         PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
         ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT));
         ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT));
-        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT, true));
+        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT));
         ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT));
-        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT, true));
+        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT));
         ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT + 1_000));
-        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + 1_000, true));
+        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + 1_000));
     }
 
     @Test public void multipleScopesCannotSilentlyChooseAnotherHouse() {
@@ -108,7 +108,7 @@ public final class PhoneAlarmStateTest {
         ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT));
         ledger.accept(parse("Armed Stay", "Other Home", "123456", EVENT + 1_000));
         ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT + 2_000));
-        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT + 2_000, true));
+        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT + 2_000));
     }
 
     @Test public void pendingConsumesRevisionAndOnlyPostCommandSourceEventClearsIt() {
@@ -118,20 +118,41 @@ public final class PhoneAlarmStateTest {
         ledger.begin(EVENT + 5_000);
         assertNotEquals(revision, ledger.revision);
         ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 1_000));
-        assertEquals(AlarmStateProtocol.Availability.BUSY, ledger.availability(EVENT + 6_000, true));
+        assertEquals(AlarmStateProtocol.Availability.BUSY, ledger.availability(EVENT + 6_000));
         ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 5_000));
-        assertEquals(AlarmStateProtocol.Availability.BUSY, ledger.availability(EVENT + 6_000, true));
+        assertEquals(AlarmStateProtocol.Availability.BUSY, ledger.availability(EVENT + 6_000));
         ledger.accept(parse("Armed Stay", "Inert Home", "123456", EVENT + 6_000));
-        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + 6_000, true));
+        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + 6_000));
     }
 
     @Test public void ttlFutureEventAndUnreconciledGapCannotBecomeReady() {
         PhoneAlarmState.Ledger ledger = new PhoneAlarmState.Ledger();
         ledger.accept(parse("Disarmed", "Inert Home", "123456", EVENT));
-        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + PhoneAlarmState.MAX_AGE_MILLIS, true));
-        assertEquals(AlarmStateProtocol.Availability.STALE, ledger.availability(EVENT + PhoneAlarmState.MAX_AGE_MILLIS + 1, true));
-        assertEquals(AlarmStateProtocol.Availability.STALE, ledger.availability(EVENT - 1, true));
-        assertEquals(AlarmStateProtocol.Availability.NO_STATE, ledger.availability(EVENT, false));
+        assertEquals(AlarmStateProtocol.Availability.READY, ledger.availability(EVENT + PhoneAlarmState.MAX_AGE_MILLIS));
+        assertEquals(AlarmStateProtocol.Availability.STALE, ledger.availability(EVENT + PhoneAlarmState.MAX_AGE_MILLIS + 1));
+        assertEquals(AlarmStateProtocol.Availability.STALE, ledger.availability(EVENT - 1));
+    }
+
+    @Test public void reconnectWithAnEmptyShadeKeepsTheLastAcceptedReportUntilItAges() {
+        long eventTime = System.currentTimeMillis() - 3_600_000;
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[]{notification("Armed Stay", eventTime)});
+        String revision = PhoneAlarmState.snapshot(context).revision;
+        // Model a reboot or listener restart: in-memory connection state is lost, preferences survive.
+        PhoneAlarmState.listenerDisconnected(context);
+        PhoneAlarmState.listenerConnecting(context);
+        PhoneAlarmState.reconcile(context, new StatusBarNotification[0]);
+        PhoneAlarmState.Snapshot restored = PhoneAlarmState.snapshot(context);
+        assertEquals(AlarmStateProtocol.Availability.READY, restored.availability);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, restored.state);
+        assertEquals(revision, restored.revision);
+        assertTrue(restored.ageMillis >= 3_600_000);
+        assertTrue(PhoneAlarmState.matches(context, revision, AlarmAction.DISARM));
+
+        context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putLong("event_ms", System.currentTimeMillis() - PhoneAlarmState.MAX_AGE_MILLIS - 1).commit();
+        assertEquals("The age bound, not shade contents, limits trust in a persisted report",
+            AlarmStateProtocol.Availability.STALE, PhoneAlarmState.snapshot(context).availability);
     }
 
     @Test public void readySnapshotRequiresPermissionConnectionSupportedAppAndExactRevisionAction() throws Exception {
@@ -151,10 +172,14 @@ public final class PhoneAlarmStateTest {
         PhoneAlarmState.listenerDisconnected(context);
         assertEquals(AlarmStateProtocol.Availability.OFFLINE, PhoneAlarmState.snapshot(context).availability);
         PhoneAlarmState.listenerConnecting(context);
+        assertEquals(AlarmStateProtocol.Availability.OFFLINE, PhoneAlarmState.snapshot(context).availability);
         PhoneAlarmState.reconcile(context, new StatusBarNotification[0]);
-        assertEquals(AlarmStateProtocol.Availability.NO_STATE, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("An empty shade after reconnecting keeps the persisted report",
+            AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals(ready.revision, PhoneAlarmState.snapshot(context).revision);
         PhoneAlarmState.posted(context, event);
         assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("Re-posting the same event changes nothing", ready.revision, PhoneAlarmState.snapshot(context).revision);
         PackageInfo installed = context.getPackageManager().getPackageInfo(PhoneAlarmState.ADT_PACKAGE, 0);
         installed.versionCode = 2308; Shadows.shadowOf(context.getPackageManager()).installPackage(installed);
         assertEquals(AlarmStateProtocol.Availability.SETUP, PhoneAlarmState.snapshot(context).availability);

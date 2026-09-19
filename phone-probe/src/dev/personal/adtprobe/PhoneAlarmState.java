@@ -28,7 +28,7 @@ final class PhoneAlarmState {
     private static final Pattern BODY = Pattern.compile("^([^\\r\\n]+?): ([^\\r\\n()]+) was (Disarmed|Armed Stay|Armed Away) at ([0-9]{2}:[0-9]{2}) on ([0-9]{2}/[0-9]{2}/[0-9]{4})\\. \\(([^\\r\\n()]+)\\)$");
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd/MM/uuuu HH:mm", Locale.UK)
         .withResolverStyle(ResolverStyle.STRICT);
-    private static boolean connected, reconciled, connectionHasLatest, storageFailed;
+    private static boolean connected, reconciled, storageFailed;
 
     private PhoneAlarmState() { }
 
@@ -50,7 +50,7 @@ final class PhoneAlarmState {
         else if (!validAdt(context)) availability = AlarmStateProtocol.Availability.SETUP;
         else if (!connected || !reconciled) availability = AlarmStateProtocol.Availability.OFFLINE;
         else if (storageFailed) availability = AlarmStateProtocol.Availability.NO_STATE;
-        else availability = ledger.availability(System.currentTimeMillis(), connectionHasLatest);
+        else availability = ledger.availability(System.currentTimeMillis());
         return new Snapshot(availability == AlarmStateProtocol.Availability.READY ? ledger.state : AlarmStateProtocol.State.UNKNOWN,
             ledger.revision, age, availability);
     }
@@ -92,7 +92,7 @@ final class PhoneAlarmState {
     }
 
     static synchronized void listenerConnecting(Context context) {
-        connected = true; reconciled = false; connectionHasLatest = false;
+        connected = true; reconciled = false;
         changed(context);
     }
 
@@ -104,11 +104,9 @@ final class PhoneAlarmState {
             Event event = parse(notification, now);
             if (event != null) ledger.accept(event);
         }
-        connectionHasLatest = false;
-        if (notifications != null) for (StatusBarNotification notification : notifications) {
-            Event event = parse(notification, now);
-            if (event != null && ledger.isLatest(event)) connectionHasLatest = true;
-        }
+        // The persisted ledger stays authoritative. Android clears the shade on reboot, so the
+        // latest accepted report need not still be posted for the phone to keep reporting it;
+        // the 24-hour age bound in availability() limits how long it is trusted.
         reconciled = notifications != null;
         write(context, ledger);
         changed(context);
@@ -119,15 +117,13 @@ final class PhoneAlarmState {
         Event event = parse(notification, System.currentTimeMillis());
         if (event == null) return;
         Ledger ledger = read(context);
-        boolean updated = ledger.accept(event);
-        boolean previouslyHadLatest = connectionHasLatest;
-        if (ledger.isLatest(event)) connectionHasLatest = true;
-        if (updated) write(context, ledger);
-        if (updated || previouslyHadLatest != connectionHasLatest) changed(context);
+        if (!ledger.accept(event)) return;
+        write(context, ledger);
+        changed(context);
     }
 
     static synchronized void listenerDisconnected(Context context) {
-        connected = false; reconciled = false; connectionHasLatest = false;
+        connected = false; reconciled = false;
         changed(context);
     }
 
@@ -232,16 +228,12 @@ final class PhoneAlarmState {
             return true;
         }
 
-        boolean isLatest(Event event) {
-            return !ambiguous && conflictMillis == 0 && scope.equals(event.scope) && eventMillis == event.millis && state == event.state;
-        }
-
         void begin(long now) { pendingAfter = Math.max(now, eventMillis); revise(); }
 
-        AlarmStateProtocol.Availability availability(long now, boolean hasLatest) {
+        AlarmStateProtocol.Availability availability(long now) {
             if (ambiguous || conflictMillis > 0) return AlarmStateProtocol.Availability.NO_STATE;
             if (pendingAfter > 0) return AlarmStateProtocol.Availability.BUSY;
-            if (!hasLatest || eventMillis <= 0 || state == AlarmStateProtocol.State.UNKNOWN) return AlarmStateProtocol.Availability.NO_STATE;
+            if (eventMillis <= 0 || state == AlarmStateProtocol.State.UNKNOWN) return AlarmStateProtocol.Availability.NO_STATE;
             if (now < eventMillis || now - eventMillis > MAX_AGE_MILLIS) return AlarmStateProtocol.Availability.STALE;
             return AlarmStateProtocol.Availability.READY;
         }

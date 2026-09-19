@@ -44,7 +44,9 @@ User-enabled Android notification access feeds `PhoneAlarmState`. The parser
 accepts exact, internally consistent English alarm reports from the supported
 UK ADT package/version. It retains normalized state, event timing, a hashed
 alarm scope, revisions and pending bookkeeping. Raw notification bodies and
-account/home labels are not stored or sent to the watch.
+account/home labels are not stored or sent to the watch. The latest accepted
+report is kept across phone reboots and listener restarts: ADT's notification
+does not need to remain in the shade, only to be under 24 hours old.
 
 The watch queries for a source-matched phone report and shows its age. Red is
 reported Armed Stay/Away; green is reported Disarmed. Unknown, conflicting,
