@@ -1,6 +1,6 @@
 # ADT Watch Setup — phone module
 
-The v0.23 companion queries ADT status through a separate authenticated website
+The v0.24 companion queries ADT status through a separate authenticated website
 session and executes requests through two user-configured native ADT widgets.
 The live-query integration is undergoing validation.
 
@@ -8,7 +8,10 @@ Use **Set up ADT live status…** to sign into the official ADT/Alarm.com page,
 complete any verification there, then **Check live status** and **Use this ADT
 system**. Select the same home as both scene widgets. Only one system with one
 partition is supported. The helper does not extract passwords or verification
-codes; WebView retains session cookies. Sign in again when that session expires.
+codes from that page; WebView retains session cookies. Optional **Automatic ADT
+login…** stores credentials entered in its native screen with Android Keystore
+encryption. A successful explicit test enables bounded re-login on expiry;
+fresh verification or rejected credentials require attention on the phone.
 The fixed GET status routes are an unofficial website API integration.
 
 Configure and review `WATCH ARM STAY` and `WATCH DISARM`, create a native

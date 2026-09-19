@@ -1,6 +1,6 @@
 # How ADT Watch works
 
-The v0.23 architecture separates status queries from alarm execution. The phone
+The v0.24 architecture separates status queries from alarm execution. The phone
 and Wear modules share application ID `dev.personal.adtprobe` and a signing
 identity. Google Play Services carries bounded, source-matched messages between
 them. Live-query integration is undergoing validation.
@@ -17,8 +17,9 @@ The owner signs into the official ADT/Alarm.com page in an embedded WebView.
 This is a separate session from the native ADT app. The helper does not read that
 app's private session or extract passwords or verification codes. WebView keeps
 session cookies in app-private storage; the status client uses those cookies
-for authenticated queries. No JavaScript bridge is installed. Session expiry or
-additional verification requires the owner to return to the sign-in page.
+for authenticated queries. No JavaScript bridge is installed. Optional saved
+credentials are entered separately in a native screen; they are never extracted
+from the WebView. Additional verification can still require the owner.
 
 After explicit system selection, setup destroys the website view while retaining
 its cookies and the selected identifiers. Later setup visits can query that
@@ -28,6 +29,40 @@ transitions. This removes the completed page's JavaScript from the background;
 it does not extend or guarantee the server's session lifetime.
 Each setup query has a cancellable session wrapper. After cancellation or
 completion, that attempt cannot read or overwrite the shared session cookies.
+
+### Optional automatic login
+
+`AdtCredentialStore` encrypts both username and password with AES-256-GCM and
+an Android Keystore key. The credential-encrypted app storage is unavailable
+before the first device unlock after reboot. The key permits subsequent
+locked-phone use, without a per-use biometric prompt. Backups are disabled.
+The native entry screen blocks screenshots and view-state persistence, clears
+inputs on exit, and provides **Forget saved login**.
+
+`AdtSessionRecovery` enables background use only after an explicit phone test
+logs in and reads the already selected system/partition. On a status
+authentication failure it serializes one login attempt inside the existing
+query deadline and requires a fresh, matching status response before returning
+state. It never sends or replays an alarm action. An attempt is recorded before
+submission; transient failures have a five-minute retry delay, while rejected
+credentials, renewed verification and unsupported flows pause attempts until
+an explicit successful test. A cancelled or failed retest cannot enable recovery.
+
+`AdtLoginClient` is separate from the GET-only status client. It reads the
+verified Alarm.com login form and sends credentials once to the fixed HTTPS
+`www.alarm.com/web/Default.aspx` endpoint. It never follows a credential POST
+redirect. Each attempt uses an isolated temporary cookie jar, seeded only with
+the same-app trusted-device cookie. A successful read of the selected home
+commits the new cookies; failed tests preserve the old session and cannot pass
+using its existing authentication. MFA challenges must be
+completed in the official website. Requests, responses and errors have only
+closed diagnostics. No password, cookie or account body is logged. Starting a
+new login invalidates older native sessions' cookie writes, and interactive
+website sign-in suspends automatic attempts.
+
+This is an unofficial login flow. The branded ADT login page, CAPTCHA, changed
+website forms and server-mandated verification are not automatically solved.
+There is no idle keepalive or guarantee of uninterrupted overnight access.
 
 The client permits only fixed HTTPS GET routes on Alarm.com's website API.
 Setup discovers the account's selected system through the identities endpoint;
@@ -134,7 +169,7 @@ coloured control.
 Pure and Robolectric tests use invented HTTP responses, inert widgets and
 simulated lifecycle events. They do not contact ADT or operate an alarm.
 Earlier personal-device checks verified the native widget route with a locked
-phone and ADT battery usage Unrestricted. They do not establish v0.23 live-query
+phone and ADT battery usage Unrestricted. They do not establish v0.24 live-query
 compatibility, session longevity or reliable overnight operation. Those require
 separate physical verification.
 

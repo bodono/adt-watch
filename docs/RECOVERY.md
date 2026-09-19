@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide describes v0.23, whose live-query integration is undergoing
+This guide describes v0.24, whose live-query integration is undergoing
 validation. Rebuilding the apps does not recreate their private device setup.
 The owner completes native widget consent, watch association, routine approval
 and both ADT sign-ins on their devices.
@@ -84,7 +84,7 @@ adb -d install -r build/phone-probe.apk
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
 builds at the same version and signature. Update the watch first, then the phone.
-Both apps need v0.23 for live-query observation identity and freshness handling.
+Both apps need v0.24 for live-query observation identity and freshness handling.
 After updating an earlier installation, complete the new website sign-in and
 explicit system selection below; existing native ADT sign-in is not enough.
 An existing sign-in and system selection in this helper are retained by an
@@ -129,8 +129,7 @@ compatibility review.
 5. **Sign in for live status and choose the same home.** Open **Set up ADT live
    status…** on the helper's main screen. Sign into the official ADT/Alarm.com
    page shown there and complete any verification in that page. This is a
-   separate session from the native ADT app. The helper does not extract or
-   store your password or verification code; WebView retains session cookies
+   separate session from the native ADT app. That page's password and verification code are not extracted; WebView retains session cookies
    in app-private browser storage. Tap **Check live status**. Review the returned
    system, partition and actual state, then tap **Use this ADT system** only if
    it is the same home as both scene widgets. No system is selected automatically.
@@ -196,8 +195,32 @@ controls without waiting for a notification; the earlier uncertain request is
 not automatically repeated. Native ADT work already queued can execute later.
 
 Earlier native-widget cycles worked with the phone locked and ADT set to
-Unrestricted. v0.23 live queries, session longevity and reliable overnight use
+Unrestricted. v0.24 live queries, session longevity and reliable overnight use
 still require physical verification.
+
+## Optional automatic login
+
+1. Finish **Set up ADT live status…**, check the matching home, and tap **Use this
+   ADT system** to close the website. Complete any ADT verification yourself;
+   use its trusted-device option if offered.
+2. Open **Automatic ADT login…** on the helper's main screen. Enter your username
+   and password directly on the phone, then **Save and test automatic login**.
+   Keep the screen open while it checks. This logs in and reads status without
+   sending an alarm command. Only a successful test enables automatic recovery.
+3. Lock the phone and refresh the watch. On ordinary session expiry the helper
+   can re-login and read the same home inside the status-check deadline.
+4. If the saved password changes or ADT asks for verification, use **Open ADT
+   sign-in** to finish the official flow, select the same home again, then
+   **Test saved login**. Failed or cancelled tests leave recovery disabled.
+   **Forget saved login** removes its encrypted credentials and key.
+
+Credentials remain encrypted in private phone storage and are not included in
+backups. They cannot be recovered from GitHub or transferred with this app's
+source. After restarting the phone, unlock it once before background use.
+Automatic login is unofficial and still needs real-account and overnight
+validation. It does not renew the separate native ADT app session or retry an
+alarm command. Errors display a closed **Check code** that can be shared without
+including account details.
 
 ## Changes and troubleshooting
 
@@ -218,7 +241,7 @@ still require physical verification.
   an HTTP status when available. Share that code when reporting a problem;
   it contains no account details. For example, `IDENTITIES/RESPONSE_SIZE/200`
   means the account-discovery response exceeded the supported size, rather
-  than a failed password. v0.23 increases that discovery limit. A timeout or
+  than a failed password. v0.24 increases that discovery limit. A timeout or
   server error can be retried with **Check live status**; signing in again is
   needed when the screen specifically requests sign-in or verification.
 - **More than one system/partition or an unsupported response:** this version

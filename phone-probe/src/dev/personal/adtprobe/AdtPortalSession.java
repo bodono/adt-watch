@@ -41,20 +41,29 @@ final class AdtPortalSession {
     /** Create on the UI thread after the WebView has been initialized; use from the query worker. */
     static AdtPortalClient.Session session(Context context) {
         CookieManager manager = CookieManager.getInstance();
-        String agent = WebSettings.getDefaultUserAgent(context.getApplicationContext());
         String origin = sessionOrigin(manager::getCookie, verifiedOrigin(context));
+        return AdtSessionRecovery.guardSession(session(context, manager, origin, false));
+    }
+
+    /** Separate, fixed Alarm.com login scope. The status client's requests remain GET-only. */
+    static AdtPortalClient.Session loginSession(Context context) {
+        return session(context, CookieManager.getInstance(), COOKIE_ORIGIN, true);
+    }
+
+    private static AdtPortalClient.Session session(Context context, CookieManager manager, String origin, boolean login) {
+        String agent = WebSettings.getDefaultUserAgent(context.getApplicationContext());
         return new AdtPortalClient.Session() {
             private boolean changed;
             @Override public String origin() { return origin; }
             @Override public String cookies() { return cookies(origin + "/web/api/identities"); }
             @Override public String cookies(String requestUrl) {
-                requireApiUrl(origin, requestUrl);
+                requireSessionUrl(origin, requestUrl, login);
                 return manager.getCookie(requestUrl);
             }
             @Override public String userAgent() { return agent; }
             @Override public void storeCookie(String value) { storeCookie(origin + "/web/api/identities", value); }
             @Override public void storeCookie(String responseUrl, String value) {
-                requireApiUrl(origin, responseUrl);
+                requireSessionUrl(origin, responseUrl, login);
                 if (value != null && !value.isEmpty()) { manager.setCookie(responseUrl, value); changed = true; }
             }
             @Override public void persist() {
@@ -101,6 +110,12 @@ final class AdtPortalSession {
     private static void requireApiUrl(String origin, String url) {
         if (url == null || !url.startsWith(origin + "/web/api/"))
             throw new IllegalArgumentException("Unexpected cookie scope");
+    }
+
+    private static void requireSessionUrl(String origin, String url, boolean login) {
+        if (login && (url != null && (url.equals(origin + "/login") || url.equals(origin + "/login.aspx")
+                || url.equals(origin + "/web/Default.aspx")))) return;
+        requireApiUrl(origin, url);
     }
 
     static final class Binding {

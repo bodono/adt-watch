@@ -53,18 +53,20 @@ public final class MainActivity extends Activity {
             scroll.setPadding(edges.left, edges.top, edges.right, edges.bottom); return insets;
         });
         text("ADT Watch Setup", 28, Color.WHITE);
-        text("Personal app · v0.23", 15, Color.LTGRAY);
+        text("Personal app · v0.24", 15, Color.LTGRAY);
         text("One-tap watch control", 21, Color.WHITE);
         text("Red means ADT reported Armed: tap to Disarm. Green means ADT reported Disarmed: tap to Arm Stay. "
             + "The watch also has an ADT Watch tile you can add to its swipeable tiles.", 16, Color.LTGRAY);
         text("Set up ADT live status below: sign in to the official ADT page and choose the same home as both scene widgets. "
             + "This is a separate sign-in from the ADT app. Refresh queries ADT's actual state without operating the alarm. "
-            + "If the website session expires, sign in again here.", 15, Color.LTGRAY);
+            + "Optional automatic login can recover an expired session. ADT may still ask you to verify a login.", 15, Color.LTGRAY);
         alarmStatus = text(PhoneAlarmState.setupStatus(this), 15, Color.rgb(155, 212, 229));
         button("Watch control access…", view ->
             startActivity(new Intent(this, RoutineSetupActivity.class)));
         button("Set up ADT live status…", view ->
             startActivity(new Intent(this, AdtPortalSetupActivity.class)));
+        button("Automatic ADT login…", view ->
+            startActivity(new Intent(this, AdtAutoLoginActivity.class)));
         button("Allow ADT refresh hints…", view -> {
             Intent settings = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
                 .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,

@@ -24,6 +24,7 @@
         <activity android:name=".WidgetSetupActivity" android:exported="false" />
         <activity android:name=".RoutineSetupActivity" android:exported="false" />
         <activity android:name=".AdtPortalSetupActivity" android:exported="false" />
+        <activity android:name=".AdtAutoLoginActivity" android:exported="false" />
         <activity android:name=".ArmExperimentActivity" android:exported="false" />
         <service android:name=".ArmExperimentService" android:exported="false"
             android:foregroundServiceType="shortService" android:stopWithTask="true" />

@@ -51,6 +51,7 @@ public final class AdtPortalSetupActivity extends Activity {
     private AdtPortalClient.Result candidate;
     private FutureTask<Void> inFlight;
     private long queryStarted, deadline, candidateStarted;
+    private long signInLease;
     private int generation;
     private boolean resumed;
     private final Runnable tick = new Runnable() {
@@ -100,6 +101,7 @@ public final class AdtPortalSetupActivity extends Activity {
 
     @SuppressLint("SetJavaScriptEnabled") // ADT login requires JavaScript; navigation is restricted and no bridge is installed.
     private void openWebsite() {
+        signInLease = AdtSessionRecovery.beginInteractiveSignIn();
         web = new WebView(this);
         web.setSaveEnabled(false);
         WebSettings settings = web.getSettings();
@@ -127,6 +129,7 @@ public final class AdtPortalSetupActivity extends Activity {
         old.stopLoading();
         if (old.getParent() instanceof ViewGroup) ((ViewGroup) old.getParent()).removeView(old);
         old.destroy();
+        AdtSessionRecovery.endInteractiveSignIn(signInLease); signInLease = 0;
     }
 
     private void beginCheck() {
@@ -169,12 +172,20 @@ public final class AdtPortalSetupActivity extends Activity {
         } else if (result != null && result.status == AdtPortalClient.Status.READY
                 && AlarmStateProtocol.action(result.state) != null && AdtPortalSession.validId(result.systemId)
                 && AdtPortalSession.validId(result.partitionId)) {
+            final String origin;
+            try { origin = session.origin(); }
+            catch (RuntimeException cancelled) {
+                candidate = null;
+                recordDiagnostic("UI/SESSION_CHANGED", "UNAVAILABLE", result.elapsedMillis);
+                status.setText("The sign-in changed during this check. Tap Check live status again.");
+                updateButtons(); return;
+            }
             candidate = result; candidateStarted = queryStarted;
-            AdtPortalSession.recordVerifiedOrigin(this, session.origin());
+            AdtPortalSession.recordVerifiedOrigin(this, origin);
             status.setText("ADT reports " + stateLabel(result.state) + ".\nSystem: " + display(result.systemLabel, result.systemId)
                 + "\nPartition: " + display(result.partitionLabel, result.partitionId)
                 + String.format(Locale.UK, "\nQuery: %.1f seconds.", Math.max(0, result.elapsedMillis) / 1000.0)
-                + "\nSession host: " + URI.create(session.origin()).getHost()
+                + "\nSession host: " + URI.create(origin).getHost()
                 + "\nBefore choosing, check that this is the same home as your configured Arm Stay and Disarm scenes.");
         } else status.setText(failureMessage(result == null ? null : result.status)
             + (result == null ? "" : "\nCheck code: " + result.diagnosticCode()));

@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app on a paired Android phone. It is not affiliated with
 or supported by ADT or Alarm.com.
 
-The v0.23 integration uses a read-only ADT website query for status and native
+The v0.24 integration uses a read-only ADT website query for status and native
 ADT scene widgets for alarm requests. This version is being validated; earlier
 personal-device checks do not establish reliability of the new live-query flow.
 
@@ -33,9 +33,14 @@ The sign-in may pass through other ADT or Alarm.com hosts; the helper looks for
 the resulting session at its API URL on both the ADT portal host and alarm.com,
 tries the host that last completed a check first, and the setup screen names
 the host it found after a successful check.
-The helper does not extract or store them; WebView retains the authenticated
-session cookies in its private browser storage. An expired session requires
-signing in again on the phone.
+The helper does not extract credentials from that page; WebView retains its
+session cookies. Optional **Automatic ADT login…** lets you enter credentials
+in a separate native screen, encrypted on the phone using Android Keystore.
+After **Save and test automatic login** verifies the selected home, an expired
+session can trigger one automatic re-login and a fresh status read. Additional
+verification, rejected credentials or an unsupported login page pause recovery
+until you check it on the phone. The helper never retries an alarm command.
+See [automatic login setup](docs/RECOVERY.md#optional-automatic-login).
 
 The status client uses a fixed, read-only part of Alarm.com's website API. This
 is an unofficial integration, not a supported public ADT API. It supports one

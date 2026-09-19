@@ -89,6 +89,18 @@ public final class AdtPortalSetupActivityTest {
         assertFalse(ArmExperimentService.isRunning());
     }
 
+    @Test public void newerSignInBetweenResultAndMainCallbackDiscardsCandidateWithoutCrashing() {
+        answer = ready(); begin();
+        work.remove().run();
+        long newer = AdtSessionRecovery.beginInteractiveSignIn();
+        try {
+            idle();
+            assertEquals(View.GONE, button("Use this ADT system").getVisibility());
+            assertTrue(screenText().contains("sign-in changed"));
+            assertNull(AdtPortalSession.binding(context));
+        } finally { AdtSessionRecovery.endInteractiveSignIn(newer); }
+    }
+
     @Test public void explicitFreshChoiceStoresOnlyPanelIdentityAndInvalidatesPreviousBinding() {
         answer = ready(); begin(); finishQuery();
         button("Use this ADT system").performClick();

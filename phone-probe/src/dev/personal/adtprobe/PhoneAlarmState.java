@@ -250,7 +250,7 @@ final class PhoneAlarmState {
             // The host that answered an authenticated read is the one to try first next time.
             if (result.status == AdtPortalClient.Status.READY || result.status == AdtPortalClient.Status.BUSY)
                 AdtPortalSession.recordVerifiedOrigin(context, portal.origin());
-            return result;
+            return AdtSessionRecovery.recover(context, binding, result, deadline);
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }
         finally { session.cancel(false); }
