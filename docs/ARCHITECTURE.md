@@ -71,7 +71,11 @@ commands. Both devices check the source, action, identity and deadline; watch
 focus loss, pause or lock cancels an uncommitted attempt. A matching commit
 cannot cold-start the phone service, and process death never resumes a command.
 
-Before native execution, the phone makes a fresh read-only query. If ADT already
+A tap the phone cannot serve (unlocked, a session still closing, widget setup
+open, or no approved watch) is declined before any ADT read. Otherwise, before
+native execution, the phone makes a fresh read-only query; the watch allows
+fifteen seconds for the challenge so that read, the service start and the
+widget's settle time fit inside its deadline. If ADT already
 reports the selected action's target state, no widget click is needed. The
 request is never reinterpreted as the opposite action. Otherwise the phone
 prepares the selected widget and uses the matched challenge/commit exchange to

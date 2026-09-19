@@ -10,7 +10,9 @@ public final class ArmExperimentProtocol {
     public static final String COMMIT_PATH = "/adt-probe/v2/alarm/commit";
     public static final String RESULT_PATH = "/adt-probe/v2/alarm/result";
     public static final int MAX_PAYLOAD_BYTES = 256;
-    public static final long READINESS_TIMEOUT_MS = 10_000L;
+    // From the tap: the phone's ADT preflight read, service start, widget render and stable
+    // window, node check and two transport hops all fit inside it before a challenge arrives.
+    public static final long READINESS_TIMEOUT_MS = 15_000L;
     public static final long TOTAL_TIMEOUT_MS = 30_000L;
     public static final long CONFIRM_TIMEOUT_MS = 20_000L;
     public static final long RESULT_TIMEOUT_MS = 10_000L;
