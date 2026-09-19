@@ -60,6 +60,49 @@ public final class AdtPortalClientTest {
         assertEquals(AdtPortalClient.ORIGIN + "/web/api/devices/partitions/" + PARTITION, transport.requests.get(2).url);
     }
 
+    @Test public void statusReadsOnlyTheBoundPartition() throws Exception {
+        transport.responses.add(json(partition(2, 2)));
+        AdtPortalClient.Result result = client.status(SYSTEM, PARTITION, clock.now + 5_000);
+        assertEquals(AdtPortalClient.Status.READY, result.status);
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, result.state);
+        assertEquals(SYSTEM, result.systemId); assertEquals(PARTITION, result.partitionId);
+        assertEquals("Inert System", result.partitionLabel); assertEquals("", result.systemLabel);
+        assertEquals(2, result.actualStateCode); assertNull(result.loading);
+        assertEquals("PARTITION/NONE/200", result.diagnosticCode());
+        assertEquals("One round trip, not two", 1, transport.requests.size());
+        assertEquals(AdtPortalClient.ORIGIN + "/web/api/devices/partitions/" + PARTITION, transport.requests.get(0).url);
+        assertEquals(1, session.persistCalls);
+        JSONObject loading = partition(1, 1); loading.getJSONObject("data").getJSONObject("attributes").put("loading", true);
+        transport.responses.add(json(loading));
+        assertEquals(AdtPortalClient.Status.BUSY, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+    }
+
+    @Test public void statusRejectsOtherOwnersOtherPartitionsAndInvalidBindings() throws Exception {
+        JSONObject otherOwner = partition(1, 1);
+        otherOwner.getJSONObject("data").put("relationships", new JSONObject().put("system",
+            new JSONObject().put("data", ref("another-system", "systems/system"))));
+        transport.responses.add(json(otherOwner));
+        assertEquals(AdtPortalClient.Status.AMBIGUOUS, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+        JSONObject ownedHere = partition(1, 1);
+        ownedHere.getJSONObject("data").put("relationships", new JSONObject().put("system",
+            new JSONObject().put("data", ref(SYSTEM, "systems/system"))));
+        transport.responses.add(json(ownedHere));
+        assertEquals(AdtPortalClient.Status.READY, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+        transport.responses.add(json(partition(1, 1)));
+        assertEquals("The response must carry the bound partition id", AdtPortalClient.Status.AMBIGUOUS,
+            client.status(SYSTEM, "another-partition", clock.now + 5_000).status);
+        JSONObject noState = partition(1, 1); noState.getJSONObject("data").getJSONObject("attributes").put("hasState", false);
+        transport.responses.add(json(noState));
+        assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.status(SYSTEM, PARTITION, clock.now + 5_000).status);
+        int requests = transport.requests.size();
+        assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.status("../login", PARTITION, clock.now + 5_000).status);
+        assertEquals(AdtPortalClient.Status.UNSUPPORTED, client.status(SYSTEM, "a?x=1", clock.now + 5_000).status);
+        assertEquals("SESSION/TIMEOUT", client.status(SYSTEM, PARTITION, clock.now).diagnosticCode());
+        transport.responses.add(new AdtPortalClient.Response(401, "text/html", new byte[0], null));
+        assertEquals("PARTITION/HTTP/401", client.status(SYSTEM, PARTITION, clock.now + 5_000).diagnosticCode());
+        assertEquals("Invalid identifiers or an expired deadline never reach the transport", requests + 1, transport.requests.size());
+    }
+
     @Test public void desiredStateIsNeverReportedAsActualAndLoadingIsExplicitlyUncertain() throws Exception {
         enqueue(1, 2);
         AdtPortalClient.Result result = client.query(5_000);
