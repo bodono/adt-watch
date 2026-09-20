@@ -239,6 +239,11 @@ final class PhoneAlarmState {
         }, CONFIRMATION_POLL_MS);
     }
 
+    /** What a hint to the watch is for: a different reported state or a request that completed. */
+    static boolean stateChanged(Snapshot before, Snapshot after) {
+        return before.state != after.state || !before.completedRequest.equals(after.completedRequest);
+    }
+
     static boolean changed(Snapshot before, Snapshot after) {
         return before.state != after.state || before.availability != after.availability || before.pending != after.pending
             || !before.revision.equals(after.revision) || !before.completedRequest.equals(after.completedRequest);
@@ -276,7 +281,15 @@ final class PhoneAlarmState {
                     expected.again = false;
                 }
                 // A notification means the state probably just changed, so this read is not reused.
-                try { refresh(app, 0); publishOperation.publish(app); }
+                // The watch hears about it only when something did change: every message wakes
+                // the watch for a discovery, a query and a reply, and most ADT notifications (a
+                // login alert, a trouble condition) leave the alarm state exactly as it was.
+                try {
+                    Snapshot before = snapshot(app);
+                    Snapshot after = refresh(app, 0);
+                    // A failed read can hide a known state as UNKNOWN; that is not an ADT state change.
+                    if (after.verified && stateChanged(before, after)) publishOperation.publish(app);
+                }
                 finally {
                     boolean followUp;
                     synchronized (HINT_LOCK) {
@@ -329,8 +342,9 @@ final class PhoneAlarmState {
 
     /**
      * Only a session known to be alive is kept alive: after a failed read, or a reboot, this stops
-     * until a read succeeds again. The read itself never starts a login. A changed state is sent
-     * to the watch as a hint; an unchanged one is not worth waking it for.
+     * until a read succeeds again. The read itself never starts a login, and it never contacts
+     * the watch: keeping the phone's session alive must cost the watch nothing, and the watch
+     * asks for the state when it is used.
      */
     private static void keepAlive(Context app, long generation) {
         if (generation != KEEP_ALIVE_GENERATION.get()) return;
@@ -342,9 +356,7 @@ final class PhoneAlarmState {
                     || stored.getInt("lastQueryBoot", -1) != boot(app)) return;
         }
         diagnostic("KEEP_ALIVE");
-        Snapshot before = snapshot(app);
-        Snapshot value = refresh(app, 0);
-        if (value.verified && before.state != value.state) publishOperation.publish(app);
+        refresh(app, 0);
     }
 
     private static void diagnostic(String event) {

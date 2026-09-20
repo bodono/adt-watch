@@ -172,8 +172,13 @@ While a request is pending or ADT reports busy, shared reads must be less than
 one second old; steady-state reads retain the three-second reuse window. A
 confirmation read must have begun after dispatch. ADT notification hints queue
 an immediate fresh read, with one coalesced follow-up if another hint arrives
-during that read, so the later event is not lost. The phone tells the watch
-when something changed; a caller that merely waited for another read in
+during that read, so the later event is not lost. Ongoing notifications and
+group summaries, which are re-posted without anything happening, are not hints.
+The phone tells the watch only when the reported state or a request's result
+changed: every message wakes the watch for a discovery, a query and a reply, so
+a login alert or a trouble condition that leaves the alarm as it was sends
+nothing, and the keep-alive read never contacts the watch. A caller that
+merely waited for another read in
 progress is answered from the ledger rather than recorded as a failure. A tap's
 preflight never reuses an earlier read; when its own read cannot complete, that
 tap is declined and the display keeps the earlier observation. A read that

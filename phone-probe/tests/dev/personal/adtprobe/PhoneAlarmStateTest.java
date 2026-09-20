@@ -272,7 +272,7 @@ public final class PhoneAlarmStateTest {
             advance(5 * 60_000);
         }
         assertEquals(6, queries);
-        assertEquals(3, published);
+        assertEquals("A still signed-out state is not pushed, so the idle loop never even reaches the watch", 0, published);
         assertEquals("Neither side of the idle notification loop may submit credentials", 0, recoveries);
         assertEquals(AlarmStateProtocol.Availability.NO_ACCESS, PhoneAlarmState.snapshot(context).availability);
     }
@@ -419,12 +419,82 @@ public final class PhoneAlarmStateTest {
         advance(PhoneAlarmState.KEEP_ALIVE_MS); next.action.run();
         assertEquals("A reboot ends the chain until a read succeeds again", before + 1, queries);
     }
-    @Test public void aKeepAliveReadAnnouncesAChangedState() {
+    @Test public void aKeepAliveReadNeverContactsTheWatch() {
         bind(); read(); ScheduledRead keepAlive = keepAlives.remove(0);
         answer = result(AlarmStateProtocol.State.ARMED_STAY);
         advance(PhoneAlarmState.KEEP_ALIVE_MS); keepAlive.action.run();
+        assertEquals("The read is stored for the next watch query", AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
+        assertEquals("Keeping the phone's session alive costs the watch nothing", 0, published);
+    }
+    @Test public void aNotificationHintReachesTheWatchOnlyWhenTheStateChanged() {
+        bind(); read(); captureSchedule();
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
+        assertEquals(2, queries);
+        assertEquals("Same state: the watch is not woken for a round trip", 0, published);
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
         assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
-        assertEquals("A state that changed while nobody looked reaches the watch as a hint", 1, published);
+        assertEquals("A changed state is pushed once", 1, published);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
+        assertEquals("A failed hint read is not pushed either; the watch asks when it needs to", 1, published);
+        PhoneAlarmState.Snapshot armed = PhoneAlarmState.snapshot(context);
+        assertTrue(PhoneAlarmState.beginCommand(context, armed.revision, AlarmAction.DISARM, UUID.randomUUID().toString()));
+        scheduled.clear(); // The command's own confirmation poll is not under test here.
+        answer = result(AlarmStateProtocol.State.DISARMED);
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
+        assertEquals("A hint read that completes a request is pushed", 2, published);
+    }
+    @Test public void aFailedNotificationHintThatHidesKnownStateNeverContactsTheWatch() {
+        bind(); captureSchedule();
+        for (AdtPortalClient.Status status : new AdtPortalClient.Status[] {
+                AdtPortalClient.Status.LOGIN_REQUIRED, AdtPortalClient.Status.VERIFY_LOGIN,
+                AdtPortalClient.Status.UNSUPPORTED, AdtPortalClient.Status.AMBIGUOUS }) {
+            answer = result(AlarmStateProtocol.State.DISARMED);
+            assertTrue(read().verified);
+            answer = failure(status);
+            advance(1); PhoneAlarmState.hint(context); runNext(0);
+            PhoneAlarmState.Snapshot failed = PhoneAlarmState.snapshot(context);
+            assertTrue(status.name(), failed.readFailed);
+            assertEquals(status.name(), AlarmStateProtocol.State.UNKNOWN, failed.state);
+            assertEquals("A failure hiding known state is not an alarm change: " + status, 0, published);
+        }
+        assertEquals("Each hint still reads ADT", 8, queries);
+        assertEquals("Notification hints cannot request automatic login", 0, recoveries);
+    }
+    @Test public void aFailedNotificationHintAfterObservationExpiryNeverContactsTheWatch() {
+        bind(); read(); captureSchedule();
+        advance(AdtLiveLedger.CACHE_LIMIT_MS);
+        assertEquals(AlarmStateProtocol.Availability.STALE, PhoneAlarmState.snapshot(context).availability);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        PhoneAlarmState.hint(context); runNext(0);
+        PhoneAlarmState.Snapshot failed = PhoneAlarmState.snapshot(context);
+        assertTrue(failed.readFailed);
+        assertEquals(AlarmStateProtocol.State.UNKNOWN, failed.state);
+        assertEquals(AlarmStateProtocol.Availability.OFFLINE, failed.availability);
+        assertEquals(2, queries);
+        assertEquals("Expiry followed by a failed read is not an alarm change", 0, published);
+    }
+    @Test public void aNotificationHintPublishesSameStateRequestCompletion() {
+        bind(); PhoneAlarmState.Snapshot first = read();
+        String request = UUID.randomUUID().toString();
+        assertTrue(PhoneAlarmState.beginCommand(context, first.revision, AlarmAction.ARM_STAY, request));
+        // ADT can report the target state while it is still busy. The later settlement is useful
+        // even though it will leave that state and its revision unchanged.
+        answer = new AdtPortalClient.Result(AdtPortalClient.Status.BUSY, AlarmStateProtocol.State.ARMED_STAY,
+            "system-1", "partition-1", "Fixture", "Panel", 1, 1, 1, true);
+        PhoneAlarmState.Snapshot busy = read();
+        assertTrue(busy.pending); assertTrue(busy.providerBusy);
+        assertEquals("-", busy.completedRequest);
+        captureSchedule();
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        advance(1); PhoneAlarmState.hint(context); runNext(0);
+        PhoneAlarmState.Snapshot settled = PhoneAlarmState.snapshot(context);
+        assertEquals(busy.state, settled.state);
+        assertEquals(busy.revision, settled.revision);
+        assertFalse(settled.pending); assertFalse(settled.providerBusy);
+        assertEquals(request, settled.completedRequest);
+        assertEquals("Completing a request still wakes the watch once", 1, published);
     }
     @Test public void aPollPublishesOnlyWhenSomethingChanged() {
         bind(); PhoneAlarmState.Snapshot first = read();
