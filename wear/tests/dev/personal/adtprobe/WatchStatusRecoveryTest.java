@@ -252,6 +252,32 @@ public final class WatchStatusRecoveryTest {
         assertFalse(WatchAlarmStore.read(context).enabled);
     }
 
+    @Test public void aPhoneHintAfterTheSignInAnswerRestartsOneBoundedQuery() {
+        refresh(); connect(0);
+        assertTrue(answer(0, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        advance(30_000);
+        assertEquals("The sign-in answer stopped polling", 1, transport.discoveries.size());
+        assertEquals(1, transport.queries.size());
+        // The phone logged in again by itself and says so with a hint, whatever that hint's own availability.
+        transport.autoConnect = true;
+        byte[] payload = new AlarmStateProtocol.Report("-", AlarmStateProtocol.State.UNKNOWN,
+            AlarmStateProtocol.Availability.OFFLINE, "-", 0).encode();
+        WatchAlarmStore.receive(context, new MessageEvent() {
+            @Override public int getRequestId() { return 0; }
+            @Override public String getPath() { return AlarmStateProtocol.STATE_PATH; }
+            @Override public byte[] getData() { return payload; }
+            @Override public String getSourceNodeId() { return PHONE; }
+        });
+        advance(1_000);
+        assertTrue("The hint restarted a bounded query", transport.queries.size() >= 2);
+        int last = transport.queries.size() - 1;
+        assertTrue(answer(last, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R1, 0));
+        assertEquals(AlarmAction.ARM_STAY, WatchAlarmStore.read(context).action);
+        int settled = transport.queries.size();
+        advance(30_000);
+        assertEquals("A READY answer ends the recovery again", settled, transport.queries.size());
+    }
+
     @Test public void passiveRenderingRefreshesNearExpiryAndCoalescesWhileItWaits() {
         seed(AlarmStateProtocol.State.DISARMED);
         assertFalse(WatchAlarmStore.refreshIfNeeded(context));

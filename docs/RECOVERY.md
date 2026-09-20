@@ -207,8 +207,10 @@ still require physical verification.
    and password directly on the phone, then **Save and test automatic login**.
    Keep the screen open while it checks. This logs in and reads status without
    sending an alarm command. Only a successful test enables automatic recovery.
-3. Lock the phone and refresh the watch. On ordinary session expiry the helper
-   can re-login and read the same home inside the status-check deadline.
+3. Lock the phone and refresh the watch. On ordinary session expiry the watch
+   first shows the sign-in notice; the helper then re-logs in with its own
+   20-second budget, reads the same home and sends the watch fresh status, so
+   the notice clears by itself.
 4. If the saved password changes or ADT asks for verification, use **Open ADT
    sign-in** to finish the official flow, select the same home again, then
    **Test saved login**. Choosing the system again also resumes paused

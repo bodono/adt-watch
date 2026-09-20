@@ -13,9 +13,12 @@ import java.util.concurrent.locks.ReentrantLock;
 final class AdtSessionRecovery {
     static final String PREFERENCES = "adt_login_recovery";
     static final long RETRY_DELAY_MS = 5 * 60_000;
+    /** A background login plus its verifying read get this much, independent of the read that noticed. */
+    static final long BACKGROUND_BUDGET_MS = 20_000;
     private static final ReentrantLock LOGIN_LOCK = new ReentrantLock();
     private static final Object COOKIE_LOCK = new Object();
     private static long epoch, websiteOwner, testGeneration;
+    private static long queuedElapsed = -1;
 
     interface Sessions { AdtPortalClient.Session create(Context context, long deadline) throws Exception; }
     interface Login { AdtLoginClient.Result login(AdtPortalClient.Session session, String username, char[] password, long deadline); }
@@ -75,12 +78,46 @@ final class AdtSessionRecovery {
         };
     }
 
-    /** Worker only, after a failed status GET. One bounded login; never replays a watch command. */
-    static AdtPortalClient.Result recover(Context context, AdtPortalSession.Binding binding,
-            AdtPortalClient.Result failed, long deadline) {
-        if (!authenticationFailure(failed)) return failed;
-        Attempt attempt = attempt(context.getApplicationContext(), binding, deadline, false);
-        return attempt.result != null ? attempt.result : failed;
+    /**
+     * Worker only, after a failed status GET, which returns its failure at once. Queues one
+     * bounded login on the reads worker with its own budget rather than the read's leftover
+     * deadline; after a verified matching-home read, PhoneAlarmState reads once through the
+     * normal path and tells the watch. Never replays a watch command.
+     */
+    static boolean recoverLater(Context context, AdtPortalSession.Binding binding, AdtPortalClient.Result failed) {
+        if (!authenticationFailure(failed) || binding == null) return false;
+        Context app = context.getApplicationContext();
+        if (!worthAttempting(app)) return false;
+        synchronized (COOKIE_LOCK) {
+            // One queued task at a time; a task that never started stops throttling after the budget.
+            long now = SystemClock.elapsedRealtime();
+            if (queuedElapsed >= 0 && now >= queuedElapsed && now - queuedElapsed < BACKGROUND_BUDGET_MS) return false;
+            queuedElapsed = now;
+        }
+        try {
+            PhoneAlarmState.scheduleRecovery(app, () -> {
+                synchronized (COOKIE_LOCK) { queuedElapsed = -1; }
+                return usable(attempt(app, binding, SystemClock.elapsedRealtime() + BACKGROUND_BUDGET_MS, false).result);
+            });
+        } catch (RuntimeException error) {
+            synchronized (COOKIE_LOCK) { queuedElapsed = -1; }
+            return false;
+        }
+        return true;
+    }
+
+    /** The cheap part of attempt's own checks, so a signed-out watch poll does not queue no-op work. */
+    private static boolean worthAttempting(Context app) {
+        String version = credentials.version(app);
+        if (version == null || version.isEmpty()) return false;
+        synchronized (COOKIE_LOCK) {
+            if (websiteOwner != 0 || LOGIN_LOCK.isLocked()) return false;
+            SharedPreferences prefs = preferences(app);
+            if (!version.equals(prefs.getString("version", "")) || !prefs.getBoolean("enabled", false)
+                    || prefs.getBoolean("blocked", false)) return false;
+            long last = prefs.getLong("attemptWall", 0), now = System.currentTimeMillis();
+            return now >= last && now - last >= RETRY_DELAY_MS;
+        }
     }
 
     /** Explicit phone-only test also works while the old session is still valid. */
