@@ -286,7 +286,9 @@ final class PhoneAlarmState {
                 // login alert, a trouble condition) leave the alarm state exactly as it was.
                 try {
                     Snapshot before = snapshot(app);
-                    if (stateChanged(before, refresh(app, 0))) publishOperation.publish(app);
+                    Snapshot after = refresh(app, 0);
+                    // A failed read can hide a known state as UNKNOWN; that is not an ADT state change.
+                    if (after.verified && stateChanged(before, after)) publishOperation.publish(app);
                 }
                 finally {
                     boolean followUp;
