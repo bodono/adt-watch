@@ -52,7 +52,7 @@ public final class ArmExperimentServiceTest {
     private ArmExperimentService.NodeSource originalNodeSource;
     private ArmExperimentService.Responder originalResponder;
     private PhoneAlarmState.Query originalQuery;
-    private PhoneAlarmState.Schedule originalSchedule;
+    private PhoneAlarmState.Schedule originalSchedule, originalKeepAlive;
     private final List<AlarmStateProtocol.Declined> declines = new ArrayList<>();
     private AlarmStateProtocol.State backend;
     private int reads;
@@ -62,6 +62,7 @@ public final class ArmExperimentServiceTest {
         originalNodeSource = ReflectionHelpers.getStaticField(ArmExperimentService.class, "nodeSource");
         originalResponder = ReflectionHelpers.getStaticField(ArmExperimentService.class, "responder");
         originalQuery = PhoneAlarmState.queryOperation; originalSchedule = PhoneAlarmState.scheduleOperation;
+        originalKeepAlive = PhoneAlarmState.keepAliveOperation;
         ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder",
             (ArmExperimentService.Responder) (ignored, node, path, payload) -> declines.add(AlarmStateProtocol.parseDeclined(payload)));
         ArmExperimentService.cancelForNavigation(context);
@@ -75,6 +76,7 @@ public final class ArmExperimentServiceTest {
         ReflectionHelpers.setStaticField(ArmExperimentService.class, "nodeSource", originalNodeSource);
         ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder", originalResponder);
         PhoneAlarmState.queryOperation = originalQuery; PhoneAlarmState.scheduleOperation = originalSchedule;
+        PhoneAlarmState.keepAliveOperation = originalKeepAlive;
         RoutineAccess.disable(context);
         ArmExperimentService.cancelForNavigation(context);
         if (serviceController != null) serviceController.destroy();
@@ -373,6 +375,7 @@ public final class ArmExperimentServiceTest {
         assertTrue(AdtPortalSession.bind(context, "inert-system", "inert-partition"));
         backend = state;
         PhoneAlarmState.scheduleOperation = (action, delay) -> { };
+        PhoneAlarmState.keepAliveOperation = (action, delay) -> { };
         PhoneAlarmState.queryOperation = (app, deadline) -> { reads++; return new AdtPortalClient.Result(
             AdtPortalClient.Status.READY, backend, "inert-system", "inert-partition", "Inert Home", "Inert System", 10); };
         Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1));

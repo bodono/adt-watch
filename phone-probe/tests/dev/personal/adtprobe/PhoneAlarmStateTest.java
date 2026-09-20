@@ -29,6 +29,8 @@ public final class PhoneAlarmStateTest {
     private PhoneAlarmState.Query oldQuery;
     private PhoneAlarmState.Schedule oldSchedule;
     private PhoneAlarmState.Publish oldPublish;
+    private PhoneAlarmState.Schedule oldKeepAlive;
+    private final List<ScheduledRead> keepAlives = new ArrayList<>();
     private int published;
     private AdtPortalClient.Result answer;
     private int queries;
@@ -42,13 +44,15 @@ public final class PhoneAlarmStateTest {
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
         oldQuery = PhoneAlarmState.queryOperation; oldSchedule = PhoneAlarmState.scheduleOperation;
         oldPublish = PhoneAlarmState.publishOperation; PhoneAlarmState.publishOperation = app -> published++;
+        oldKeepAlive = PhoneAlarmState.keepAliveOperation;
+        PhoneAlarmState.keepAliveOperation = (action, delay) -> keepAlives.add(new ScheduledRead(action, delay));
         PhoneAlarmState.scheduleOperation = (action, delay) -> { };
         PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; return answer; };
         answer = result(AlarmStateProtocol.State.DISARMED);
     }
     @After public void finish() {
         PhoneAlarmState.queryOperation = oldQuery; PhoneAlarmState.scheduleOperation = oldSchedule;
-        PhoneAlarmState.publishOperation = oldPublish;
+        PhoneAlarmState.publishOperation = oldPublish; PhoneAlarmState.keepAliveOperation = oldKeepAlive;
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
     }
     @Test public void legacyManualOrNotificationCacheCannotSupplyState() {
@@ -314,6 +318,47 @@ public final class PhoneAlarmStateTest {
         assertEquals(1, queries);
         assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
         assertEquals("The sign-in answer stopped the watch's polling; this hint restarts it", 1, published);
+    }
+    @Test public void aSuccessfulReadKeepsTheSessionAliveTenMinutesLaterUnlessAnotherReadDidFirst() {
+        bind(); read();
+        assertEquals(1, keepAlives.size()); assertEquals(PhoneAlarmState.KEEP_ALIVE_MS, keepAlives.get(0).delay);
+        ScheduledRead first = keepAlives.remove(0);
+        advance(5 * 60_000); read();
+        assertEquals("Each successful read moves the keep-alive after itself", 1, keepAlives.size());
+        ScheduledRead second = keepAlives.remove(0);
+        advance(5 * 60_000); int before = queries;
+        first.action.run();
+        assertEquals("A superseded keep-alive does nothing", before, queries);
+        advance(5 * 60_000);
+        boolean[] quiet = {false};
+        PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; quiet[0] = PhoneAlarmState.keepAliveRead(); return answer; };
+        second.action.run();
+        assertEquals("Ten idle minutes after the last read, the phone reads again", before + 1, queries);
+        assertTrue("...as a keep-alive read, which never queues a login", quiet[0]);
+        assertFalse(PhoneAlarmState.keepAliveRead());
+        assertEquals("...and that read keeps the chain going", 1, keepAlives.size());
+        assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("An unchanged state is not worth waking the watch for", 0, published);
+    }
+    @Test public void theKeepAliveStopsAfterAFailedReadOrRebootUntilAReadSucceedsAgain() {
+        bind(); read(); ScheduledRead keepAlive = keepAlives.remove(0);
+        answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED); read();
+        assertTrue("A failed read schedules no keep-alive", keepAlives.isEmpty());
+        answer = result(AlarmStateProtocol.State.DISARMED); int before = queries;
+        advance(PhoneAlarmState.KEEP_ALIVE_MS); keepAlive.action.run();
+        assertEquals("Only a session known to be alive is kept alive", before, queries);
+        assertTrue(keepAlives.isEmpty());
+        read(); ScheduledRead next = keepAlives.remove(0);
+        Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, 4);
+        advance(PhoneAlarmState.KEEP_ALIVE_MS); next.action.run();
+        assertEquals("A reboot ends the chain until a read succeeds again", before + 1, queries);
+    }
+    @Test public void aKeepAliveReadAnnouncesAChangedState() {
+        bind(); read(); ScheduledRead keepAlive = keepAlives.remove(0);
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        advance(PhoneAlarmState.KEEP_ALIVE_MS); keepAlive.action.run();
+        assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
+        assertEquals("A state that changed while nobody looked reaches the watch as a hint", 1, published);
     }
     @Test public void aPollPublishesOnlyWhenSomethingChanged() {
         bind(); PhoneAlarmState.Snapshot first = read();
