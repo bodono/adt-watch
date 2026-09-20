@@ -136,6 +136,19 @@ public final class AdtAutoLoginActivityTest {
         assertNull(AdtPortalSession.binding(context));
     }
 
+    @Test public void aSessionVerifiedOnTheAdtHostIsFlaggedBecauseLoginUsesAlarmComOnly() {
+        assertFalse(screenText().contains("last verified ADT session"));
+        AdtPortalSession.recordVerifiedOrigin(context, "https://smartservices.adt.co.uk");
+        try {
+            controller.recreate(); activity = controller.get(); controller.windowFocusChanged(true); idle();
+            assertTrue(screenText().contains("last verified ADT session was on smartservices.adt.co.uk"));
+            assertTrue(screenText().contains("www.alarm.com only"));
+            AdtPortalSession.recordVerifiedOrigin(context, AdtLoginClient.ORIGIN);
+            controller.recreate(); activity = controller.get(); controller.windowFocusChanged(true); idle();
+            assertFalse("An alarm.com session needs no warning", screenText().contains("last verified ADT session"));
+        } finally { context.getSharedPreferences("adt_portal_session", 0).edit().clear().commit(); }
+    }
+
     @Test public void pauseCancelsQueuedTestAndClearsUnsubmittedInputsWithoutAutomaticRetry() {
         enter(); controller.pause();
         assertEquals(0, input("ADT username").length()); assertEquals(0, input("ADT password").length());
