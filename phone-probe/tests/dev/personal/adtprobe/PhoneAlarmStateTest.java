@@ -272,7 +272,7 @@ public final class PhoneAlarmStateTest {
             advance(5 * 60_000);
         }
         assertEquals(6, queries);
-        assertEquals(3, published);
+        assertEquals("A still signed-out state is not pushed, so the idle loop never even reaches the watch", 0, published);
         assertEquals("Neither side of the idle notification loop may submit credentials", 0, recoveries);
         assertEquals(AlarmStateProtocol.Availability.NO_ACCESS, PhoneAlarmState.snapshot(context).availability);
     }
@@ -419,12 +419,31 @@ public final class PhoneAlarmStateTest {
         advance(PhoneAlarmState.KEEP_ALIVE_MS); next.action.run();
         assertEquals("A reboot ends the chain until a read succeeds again", before + 1, queries);
     }
-    @Test public void aKeepAliveReadAnnouncesAChangedState() {
+    @Test public void aKeepAliveReadNeverContactsTheWatch() {
         bind(); read(); ScheduledRead keepAlive = keepAlives.remove(0);
         answer = result(AlarmStateProtocol.State.ARMED_STAY);
         advance(PhoneAlarmState.KEEP_ALIVE_MS); keepAlive.action.run();
+        assertEquals("The read is stored for the next watch query", AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
+        assertEquals("Keeping the phone's session alive costs the watch nothing", 0, published);
+    }
+    @Test public void aNotificationHintReachesTheWatchOnlyWhenTheStateChanged() {
+        bind(); read(); captureSchedule();
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
+        assertEquals(2, queries);
+        assertEquals("Same state: the watch is not woken for a round trip", 0, published);
+        answer = result(AlarmStateProtocol.State.ARMED_STAY);
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
         assertEquals(AlarmStateProtocol.State.ARMED_STAY, PhoneAlarmState.snapshot(context).state);
-        assertEquals("A state that changed while nobody looked reaches the watch as a hint", 1, published);
+        assertEquals("A changed state is pushed once", 1, published);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
+        assertEquals("A failed hint read is not pushed either; the watch asks when it needs to", 1, published);
+        PhoneAlarmState.Snapshot armed = PhoneAlarmState.snapshot(context);
+        assertTrue(PhoneAlarmState.beginCommand(context, armed.revision, AlarmAction.DISARM, UUID.randomUUID().toString()));
+        scheduled.clear(); // The command's own confirmation poll is not under test here.
+        answer = result(AlarmStateProtocol.State.DISARMED);
+        advance(1); PhoneAlarmState.hint(context); runNext(0); // A read that began after the hint arrived would be shared.
+        assertEquals("A hint read that completes a request is pushed", 2, published);
     }
     @Test public void aPollPublishesOnlyWhenSomethingChanged() {
         bind(); PhoneAlarmState.Snapshot first = read();

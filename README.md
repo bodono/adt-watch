@@ -67,8 +67,10 @@ notification prompts an immediate fresh read; it never supplies the alarm state.
 After a successful status read, the phone schedules another ten minutes later
 as a best-effort attempt to reduce idle session expiry. Whether these API reads
 extend ADT's server session still needs an idle-session test. The timer's read
-never starts a login, and it stops after a failed read. Status hints sent to the
-watch also stay passive, so a login alert cannot create another automatic login.
+never starts a login, it stops after a failed read, and it never contacts the
+watch. A notification's read reaches the watch only when the reported state or a
+request's result changed; status hints sent to the watch also stay passive, so a
+login alert cannot create another automatic login.
 Status observations expire after at most 60 seconds. Their age means
 time since the query, not time since the alarm last changed. This is a backend
 status query, not a forced physical-panel poll. Wear OS controls Tile scheduling,
