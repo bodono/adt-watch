@@ -14,6 +14,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
@@ -28,6 +29,8 @@ final class PhoneAlarmState {
     static final long CONFIRMATION_REUSE_MS = 1_000;
     /** Interval between confirmation reads after a command; each is an authenticated portal read. */
     static final long CONFIRMATION_POLL_MS = 1_000;
+    /** Alarm.com logs a website session out after fifteen idle minutes; a read this often keeps it alive. */
+    static final long KEEP_ALIVE_MS = 10 * 60_000;
     private static final long QUERY_MS = 8_000;
     private static final ReentrantLock QUERY_LOCK = new ReentrantLock();
     private static final ScheduledExecutorService READS = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -41,6 +44,9 @@ final class PhoneAlarmState {
     /** Where the phone sends the watch state it did not ask for; inert tests replace it. */
     interface Publish { void publish(Context context); }
     static Publish publishOperation = PhoneStateLink::publish;
+    static Schedule keepAliveOperation = (action, delay) -> READS.schedule(action, delay, TimeUnit.MILLISECONDS);
+    private static final AtomicLong KEEP_ALIVE_GENERATION = new AtomicLong();
+    private static final ThreadLocal<Boolean> KEEP_ALIVE_READ = new ThreadLocal<>();
     private static boolean storageFailed;
     interface Query { AdtPortalClient.Result query(Context context, long deadline); }
     static Query queryOperation = PhoneAlarmState::queryPortal;
@@ -160,6 +166,7 @@ final class PhoneAlarmState {
                 Snapshot recorded = snapshot(app, write(app, binding, ledger, result.status, started, queryBoot));
                 diagnostic("QUERY_STORED availability=" + recorded.availability.name()
                     + " pending=" + recorded.pending + " providerBusy=" + recorded.providerBusy);
+                if (recorded.verified) scheduleKeepAlive(app);
                 return recorded;
             }
         } catch (InterruptedException error) {
@@ -296,6 +303,38 @@ final class PhoneAlarmState {
         }, 0);
     }
 
+    /** Each successful read moves the keep-alive to ten minutes after itself; superseded timers do nothing. */
+    private static void scheduleKeepAlive(Context app) {
+        long generation = KEEP_ALIVE_GENERATION.incrementAndGet();
+        try { keepAliveOperation.after(() -> keepAlive(app, generation), KEEP_ALIVE_MS); }
+        catch (RuntimeException ignored) { /* The next successful read schedules again. */ }
+    }
+
+    /**
+     * Only a session known to be alive is kept alive: after a failed read, or a reboot, this stops
+     * until a read succeeds again. The read itself never starts a login. A changed state is sent
+     * to the watch as a hint; an unchanged one is not worth waking it for.
+     */
+    private static void keepAlive(Context app, long generation) {
+        if (generation != KEEP_ALIVE_GENERATION.get()) return;
+        AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
+        if (binding == null) return;
+        synchronized (PhoneAlarmState.class) {
+            SharedPreferences stored = preferences(app);
+            if (!binding.id.equals(stored.getString("bindingId", "")) || !lastReadSucceeded(stored)
+                    || stored.getInt("lastQueryBoot", -1) != boot(app)) return;
+        }
+        diagnostic("KEEP_ALIVE");
+        Snapshot before = snapshot(app);
+        Snapshot value;
+        KEEP_ALIVE_READ.set(Boolean.TRUE);
+        try { value = refresh(app, 0); } finally { KEEP_ALIVE_READ.remove(); }
+        if (value.verified && before.state != value.state) publishOperation.publish(app);
+    }
+
+    /** True on a thread inside the keep-alive's own read. */
+    static boolean keepAliveRead() { return Boolean.TRUE.equals(KEEP_ALIVE_READ.get()); }
+
     private static void diagnostic(String event) {
         Log.i("AdtPhoneStatus", SystemClock.elapsedRealtime() + " " + event);
     }
@@ -339,8 +378,11 @@ final class PhoneAlarmState {
             if (result.status == AdtPortalClient.Status.READY || result.status == AdtPortalClient.Status.BUSY)
                 AdtPortalSession.recordVerifiedOrigin(context, portal.origin());
             // A signed-out answer is returned as it is; any automatic login runs afterwards with
-            // its own budget and tells the watch when the state is back.
-            else AdtSessionRecovery.recoverLater(context, binding, result);
+            // its own budget and tells the watch when the state is back. A keep-alive read never
+            // queues one: it keeps a live session alive, and a lapsed one waits for a read someone
+            // is waiting for, so an idle phone does not log in (and ADT does not send its login
+            // alert) while nobody is using the watch.
+            else if (!keepAliveRead()) AdtSessionRecovery.recoverLater(context, binding, result);
             return result;
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }

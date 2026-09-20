@@ -38,6 +38,7 @@ public final class AdtSessionRecoveryTest {
     private PhoneAlarmState.Schedule oldSchedule;
     private PhoneAlarmState.Query oldQuery;
     private PhoneAlarmState.Publish oldPublish;
+    private PhoneAlarmState.Schedule oldKeepAlive;
     private int published;
     private final List<Runnable> scheduled = new ArrayList<>();
     private int phoneReads;
@@ -54,6 +55,7 @@ public final class AdtSessionRecoveryTest {
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "storageFailed", false);
         oldSchedule = PhoneAlarmState.scheduleOperation; oldQuery = PhoneAlarmState.queryOperation;
         oldPublish = PhoneAlarmState.publishOperation; PhoneAlarmState.publishOperation = context -> published++;
+        oldKeepAlive = PhoneAlarmState.keepAliveOperation; PhoneAlarmState.keepAliveOperation = (action, delay) -> { };
         PhoneAlarmState.scheduleOperation = (action, delay) -> scheduled.add(action);
         PhoneAlarmState.queryOperation = (context, deadline) -> { phoneReads++; return response; };
         oldSessions = AdtSessionRecovery.sessions; oldLogin = AdtSessionRecovery.loginOperation;
@@ -80,7 +82,7 @@ public final class AdtSessionRecoveryTest {
     }
     @After public void restore() {
         PhoneAlarmState.scheduleOperation = oldSchedule; PhoneAlarmState.queryOperation = oldQuery;
-        PhoneAlarmState.publishOperation = oldPublish;
+        PhoneAlarmState.publishOperation = oldPublish; PhoneAlarmState.keepAliveOperation = oldKeepAlive;
         AdtSessionRecovery.endInteractiveSignIn(website);
         AdtSessionRecovery.sessions = oldSessions; AdtSessionRecovery.loginOperation = oldLogin;
         AdtSessionRecovery.readOperation = oldRead; AdtSessionRecovery.credentials = oldCredentials;

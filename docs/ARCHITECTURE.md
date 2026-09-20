@@ -83,7 +83,13 @@ verified session host is not www.alarm.com.
 
 This is an unofficial login flow. The branded ADT login page, CAPTCHA, changed
 website forms and server-mandated verification are not automatically solved.
-There is no idle keepalive or guarantee of uninterrupted overnight access.
+While a session is known to be alive, the phone repeats a status read ten
+minutes after the last successful one, which keeps the fifteen-minute website
+session from lapsing; that read never starts a login, and after a failed read
+or a reboot the chain stops until a read succeeds again. When the phone sleeps
+deeply the timer runs late and the session can still lapse, so the next read
+someone is waiting for logs in again, at most once per lapse. There is no
+guarantee of uninterrupted overnight access.
 
 The client permits only fixed HTTPS GET routes on Alarm.com's website API.
 Setup discovers the account's selected system through the identities endpoint;

@@ -56,7 +56,7 @@ public final class ToggleServiceTest {
     private WidgetHostSession inertHost;
     private Runnable validationSideEffect;
     private PhoneAlarmState.Query originalQuery;
-    private PhoneAlarmState.Schedule originalSchedule;
+    private PhoneAlarmState.Schedule originalSchedule, originalKeepAlive;
     private AdtPortalClient.Result queryResult;
     private int queryCalls;
     private String request, revision, challenge;
@@ -78,6 +78,8 @@ public final class ToggleServiceTest {
         originalQuery = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "queryOperation");
         originalSchedule = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "scheduleOperation");
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "scheduleOperation", (PhoneAlarmState.Schedule) (action, delay) -> { });
+        originalKeepAlive = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "keepAliveOperation");
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "keepAliveOperation", (PhoneAlarmState.Schedule) (action, delay) -> { });
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "queryOperation", (PhoneAlarmState.Query) (app, deadline) -> {
             queryCalls++;
             return queryResult;
@@ -104,6 +106,7 @@ public final class ToggleServiceTest {
         RoutineAccess.disable(context); idle();
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "queryOperation", originalQuery);
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "scheduleOperation", originalSchedule);
+        ReflectionHelpers.setStaticField(PhoneAlarmState.class, "keepAliveOperation", originalKeepAlive);
     }
 
     @Test public void tapRequiresApprovedSourceCurrentRevisionAndMatchingAction() {
