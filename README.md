@@ -38,8 +38,9 @@ session cookies. Optional **Automatic ADT login…** lets you enter credentials
 in a separate native screen, encrypted on the phone using Android Keystore.
 After **Save and test automatic login** verifies the selected home, an expired
 session can trigger one automatic re-login and a fresh status read. Additional
-verification, rejected credentials or an unsupported login page pause recovery
-until you check it on the phone. The helper never retries an alarm command.
+verification or rejected credentials pause recovery until you check it on the
+phone; a login page the helper cannot read is retried later. The helper never
+retries an alarm command.
 See [automatic login setup](docs/RECOVERY.md#optional-automatic-login).
 Automatic login signs in at www.alarm.com only: when the setup screen reports a
 session host of smartservices.adt.co.uk, that sign-in's trusted-device cookie

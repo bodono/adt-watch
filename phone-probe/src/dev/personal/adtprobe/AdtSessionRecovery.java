@@ -170,7 +170,13 @@ final class AdtSessionRecovery {
                 }
                 if (login == null || login.status != AdtLoginClient.Status.SUBMITTED) {
                     String code = login == null ? "LOGIN/UNAVAILABLE" : login.diagnosticCode();
-                    record(app, version, code, login == null || login.status != AdtLoginClient.Status.UNAVAILABLE);
+                    // Pause only once the credentials were judged: a rejected or challenged attempt, or
+                    // any failure after the POST left the phone. A login page the parser could not use
+                    // cost one GET and no submission; the ordinary retry delay covers it.
+                    boolean judged = login != null && (login.status == AdtLoginClient.Status.REJECTED
+                        || login.status == AdtLoginClient.Status.VERIFY_LOGIN
+                        || login.stage == AdtLoginClient.Stage.SUBMIT && login.status != AdtLoginClient.Status.UNAVAILABLE);
+                    record(app, version, code, judged);
                     return new Attempt(null, code);
                 }
                 // Auth cookies alone are not proof. Read and validate exactly the saved home.

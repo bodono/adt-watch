@@ -135,6 +135,22 @@ public final class AdtLoginClientTest {
         transport.responses.add(redirect(302, "/web/system/home", null));
         assertEquals(AdtLoginClient.Status.SUBMITTED, login().status);
     }
+    @Test public void thePageMayOmitViewstateEncryptedAndCarryOtherForms() {
+        String page = "<html><form id='search' method='get' action='/search'><input name='q'></form>"
+            + form().replace("<input type='hidden' name='__VIEWSTATEENCRYPTED' value=''>", "")
+            + "<form id='banner' method='post' action='https://evil.test/'><input type='hidden' name='__VIEWSTATE' value='other'></form></html>";
+        transport.responses.add(html(page, null)); transport.responses.add(redirect(302, "/web/system/home", null));
+        assertEquals(AdtLoginClient.Status.SUBMITTED, login().status); assertEquals(1, posts());
+        Map<String, String> submitted = decode(transport.bodies.get(1));
+        assertFalse("A field the page did not offer is not invented", submitted.containsKey("__VIEWSTATEENCRYPTED"));
+        assertEquals("The page form's own state is what goes back", "state&+\"'", submitted.get("__VIEWSTATE"));
+        assertFalse(submitted.containsKey("q"));
+        assertEquals(ORIGIN + "/web/Default.aspx", transport.requests.get(1).url);
+        setup(); transport.responses.add(html(form() + form(), null));
+        assertEquals("Two page forms are still refused", AdtLoginClient.Status.UNSUPPORTED, login().status); assertEquals(0, posts());
+        setup(); transport.responses.add(html(form().replace("id='aspnetForm'", "id='other'"), null));
+        assertEquals("Without the page form nothing is submitted", AdtLoginClient.Status.UNSUPPORTED, login().status); assertEquals(0, posts());
+    }
     @Test public void missingDuplicateMalformedAndOutOfFormInputsNeverReachPost() {
         List<String> broken = Arrays.asList(
             form().replace("name='__EVENTVALIDATION'", "name='unknown'"),
@@ -156,8 +172,8 @@ public final class AdtLoginClientTest {
             transport.responses.add(new AdtLoginClient.Response(code, "text/html", SECRET.getBytes(StandardCharsets.UTF_8), null, null));
             AdtLoginClient.Result result = login();
             assertEquals("SUBMIT/HTTP/" + code, result.diagnosticCode()); assertEquals(1, posts());
-            AdtLoginClient.Status expected = code == 401 || code == 429 ? AdtLoginClient.Status.REJECTED
-                : code == 500 ? AdtLoginClient.Status.UNAVAILABLE : AdtLoginClient.Status.VERIFY_LOGIN;
+            AdtLoginClient.Status expected = code == 401 ? AdtLoginClient.Status.REJECTED
+                : code == 500 || code == 429 ? AdtLoginClient.Status.UNAVAILABLE : AdtLoginClient.Status.VERIFY_LOGIN;
             assertEquals(expected, result.status); assertFalse(result.toString().contains(SECRET));
         }
         setup(); transport.responses.add(html(form(), null)); transport.responses.add(html(form(), null));
