@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide describes v0.25, whose live-query integration is undergoing
+This guide describes v0.26, whose live-query integration is undergoing
 validation. Rebuilding the apps does not recreate their private device setup.
 The owner completes native widget consent, watch association, routine approval
 and both ADT sign-ins on their devices.
@@ -84,7 +84,8 @@ adb -d install -r build/phone-probe.apk
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
 builds at the same version and signature. Update the watch first, then the phone.
-Both apps need v0.25 for live-query observation identity and freshness handling.
+Update both apps to v0.26 for explicit user/passive status queries. A mixed pair
+does not provide the complete fix for idle login alerts.
 After updating an earlier installation, complete the new website sign-in and
 explicit system selection below; existing native ADT sign-in is not enough.
 An existing sign-in and system selection in this helper are retained by an
@@ -195,7 +196,7 @@ controls without waiting for a notification; the earlier uncertain request is
 not automatically repeated. Native ADT work already queued can execute later.
 
 Earlier native-widget cycles worked with the phone locked and ADT set to
-Unrestricted. v0.25 live queries, session longevity and reliable overnight use
+Unrestricted. v0.26 live queries, session longevity and reliable overnight use
 still require physical verification.
 
 ## Optional automatic login
@@ -211,6 +212,8 @@ still require physical verification.
    first shows the sign-in notice; the helper then re-logs in with its own
    20-second budget, reads the same home and sends the watch fresh status, so
    the notice clears by itself.
+   Automatic sign-in requires watch interaction. ADT notifications, background
+   Tile refreshes and idle checks cannot sign in with the saved password.
 4. If the saved password changes or ADT asks for verification, use **Open ADT
    sign-in** to finish the official flow, select the same home again, then
    **Test saved login**. Choosing the system again also resumes paused
@@ -252,12 +255,15 @@ including account details.
   server error can be retried with **Check live status**; signing in again is
   needed when the screen specifically requests sign-in or verification.
 - **Repeated "Successful Login" alerts from ADT:** automatic recovery creates
-  a new website session and can generate a login alert. The phone attempts a
+  a new website session and can generate a login alert when you use the watch.
+  Update both apps to v0.26 if alerts appear while the watch is unused: earlier
+  versions allowed notification and background Tile checks to trigger login.
+  These checks now only read an existing session, including any follow-up query
+  caused by a status hint. The phone attempts a
   status read after ten idle minutes to reduce expiry, but whether this renews
   the server session still needs verification. Its timer never starts a login;
   process death, deep sleep or a failed read can interrupt the checks. A later
-  watch request may therefore still need automatic login. Turning the alert
-  off under the account's system-event notifications hides genuine logins too.
+  user-initiated watch request may therefore still need automatic login.
 - **More than one system/partition or an unsupported response:** this version
   cannot select an arbitrary member of a multi-system account or guess an
   unfamiliar state. A compatibility change is needed; keep using ADT directly.

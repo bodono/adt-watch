@@ -21,6 +21,7 @@ import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.LooperMode;
 import org.robolectric.util.ReflectionHelpers;
+import org.robolectric.shadows.ShadowSystemClock;
 import static org.junit.Assert.*;
 
 /** Production recovery scheduling and report admission, with no GMS or alarm transport. */
@@ -138,11 +139,72 @@ public final class WatchStatusRecoveryTest {
         assertEquals(previous + 1, transport.discoveries.size());
     }
 
+    @Test public void aFinalBoundaryCallbackAfterLongSleepCanReadButCannotRequestLogin() {
+        WatchAlarmStore.ViewState before = seed(AlarmStateProtocol.State.DISARMED);
+        commit(before, AlarmAction.ARM_STAY);
+        transport.autoConnect = true;
+        WatchAlarmStore.finish(context, true); idle(); advance(2_000);
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(0).intent);
+        int beforeSleep = transport.queries.size();
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(5)); // Advance elapsed time without dispatching the main Handler.
+        idle();
+        assertTrue("The delayed boundary still queries ground truth", transport.queries.size() > beforeSleep);
+        for (int i = beforeSleep; i < transport.queries.size(); i++)
+            assertEquals("A stale timer cannot revive user login authority", AlarmStateProtocol.QueryIntent.PASSIVE,
+                transport.queries.get(i).intent);
+        advance(10_000);
+        assertFalse(WatchAlarmStore.isRefreshing());
+    }
+
+    @Test public void aFreshUserInteractionReplacesAnExpiredFinalReadOnceWithoutStarvingItsReply() {
+        WatchAlarmStore.ViewState before = seed(AlarmStateProtocol.State.DISARMED);
+        commit(before, AlarmAction.ARM_STAY); transport.autoConnect = true;
+        WatchAlarmStore.finish(context, true); idle(); advance(2_000);
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(5)); idle();
+        Object passive = WatchAlarmStore.refreshIdentity();
+        int passiveQuery = transport.queries.size() - 1;
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(passiveQuery).intent);
+        assertTrue(WatchAlarmStore.refreshIfNeeded(context, AlarmStateProtocol.QueryIntent.USER)); idle();
+        Object user = WatchAlarmStore.refreshIdentity();
+        assertNotSame(passive, user);
+        int userQuery = transport.queries.size() - 1;
+        assertEquals(passiveQuery + 1, userQuery);
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(userQuery).intent);
+        for (int i = 0; i < 4; i++) {
+            advance(250);
+            assertTrue(WatchAlarmStore.refreshIfNeeded(context, AlarmStateProtocol.QueryIntent.USER)); idle();
+            assertSame(user, WatchAlarmStore.refreshIdentity());
+            assertEquals("UI ticks share the new query", userQuery + 1, transport.queries.size());
+        }
+        assertFalse(answer(passiveQuery, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        assertTrue(answer(userQuery, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R1, 0));
+        assertTrue(WatchAlarmStore.read(context).enabled);
+    }
+
+    @Test public void anExplicitRefreshQueuedBeforeLongSleepRemainsPassiveWhenTheHandlerResumes() {
+        transport.autoConnect = true;
+        WatchAlarmStore.refresh(context);
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(5)); idle();
+        assertEquals(1, transport.queries.size());
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(0).intent);
+    }
+
+    @Test public void delayedActionCompletionDoesNotManufactureANewUserInteraction() {
+        WatchAlarmStore.ViewState before = seed(AlarmStateProtocol.State.DISARMED);
+        commit(before, AlarmAction.ARM_STAY);
+        transport.autoConnect = true;
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(5));
+        WatchAlarmStore.finish(context, true); idle();
+        assertEquals(1, transport.queries.size());
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(0).intent);
+    }
+
     @Test public void disarmWaitingForAdtBecomesArmableAfterLaterStatusReply() {
         WatchAlarmStore.ViewState armed = seed(AlarmStateProtocol.State.ARMED_STAY);
         String request = commit(armed, AlarmAction.DISARM);
         WatchAlarmStore.finish(context, true); idle();
         advance(2_000); connect(0);
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(0).intent);
         assertTrue(answer(0, AlarmStateProtocol.Availability.BUSY, AlarmStateProtocol.State.UNKNOWN, "-", 0));
         assertFalse(WatchAlarmStore.read(context).enabled);
         assertTrue(WatchAlarmStore.read(context).detail.contains("waiting for ADT"));
@@ -276,6 +338,73 @@ public final class WatchStatusRecoveryTest {
         int settled = transport.queries.size();
         advance(30_000);
         assertEquals("A READY answer ends the recovery again", settled, transport.queries.size());
+    }
+
+    @Test public void passiveRendererQueriesAndTheirRetriesNeverRequestPasswordLogin() {
+        transport.autoConnect = true;
+        assertTrue(WatchAlarmStore.refreshIfNeeded(context)); idle();
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(0).intent);
+        assertTrue(answer(0, AlarmStateProtocol.Availability.OFFLINE, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        advance(2_000);
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(1).intent);
+        assertTrue(answer(1, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        advance(30_000);
+        assertEquals(2, transport.queries.size());
+    }
+
+    @Test public void unsolicitedHintsRemainPassiveAcrossRetriesAndLaterHints() {
+        seed(AlarmStateProtocol.State.DISARMED); advance(2_000); transport.autoConnect = true;
+        push(PHONE, AlarmStateProtocol.State.ARMED_STAY, R2);
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(0).intent);
+        assertTrue(answer(0, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        advance(1_000);
+        push(PHONE, AlarmStateProtocol.State.ARMED_STAY, R2);
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(1).intent);
+        assertNull(ReflectionHelpers.getStaticField(WatchAlarmStore.class, "activeSelection"));
+    }
+
+    @Test public void userRefreshPromotesAnInFlightPassiveQueryWithoutExtendingItsDeadline() {
+        transport.autoConnect = true;
+        assertTrue(WatchAlarmStore.refreshIfNeeded(context)); idle();
+        Object original = WatchAlarmStore.refreshIdentity();
+        long started = now();
+        advance(1_000); refresh();
+        assertSame("Promotion retains the bounded recovery", original, WatchAlarmStore.refreshIdentity());
+        assertEquals(2, transport.queries.size());
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.queries.get(0).intent);
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(1).intent);
+        assertNotEquals(transport.queries.get(0).nonce, transport.queries.get(1).nonce);
+        assertFalse("Retired passive sign-in answer cannot cancel the user check",
+            answer(0, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        transport.queries.get(0).failed.run(); idle();
+        assertSame(original, WatchAlarmStore.refreshIdentity());
+        advance(30_000 - (now() - started));
+        assertFalse("Promotion does not extend thirty seconds", WatchAlarmStore.isRefreshing());
+        assertFalse(answer(1, AlarmStateProtocol.Availability.READY, AlarmStateProtocol.State.DISARMED, R1, 0));
+    }
+
+    @Test public void aUserEntryCanRecoverAfterAPassiveSignInAnswerWithoutWaitingForRenderCooldown() {
+        transport.autoConnect = true;
+        assertTrue(WatchAlarmStore.refreshIfNeeded(context)); idle();
+        assertTrue(answer(0, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        assertFalse(WatchAlarmStore.refreshIfNeeded(context));
+        assertTrue(WatchAlarmStore.refreshIfNeeded(context, AlarmStateProtocol.QueryIntent.USER));
+        advance(2_000);
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(1).intent);
+        assertTrue(answer(1, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        for (int i = 0; i < 10; i++)
+            assertFalse("Interactive UI ticks cannot loop after a failed user check",
+                WatchAlarmStore.refreshIfNeeded(context, AlarmStateProtocol.QueryIntent.USER));
+    }
+
+    @Test public void hintsDoNotChangeTheIntentOrDeadlineOfAnExistingUserCheck() {
+        seed(AlarmStateProtocol.State.DISARMED); advance(2_000); transport.autoConnect = true;
+        refresh(); Object original = WatchAlarmStore.refreshIdentity();
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(0).intent);
+        assertTrue(answer(0, AlarmStateProtocol.Availability.BUSY, AlarmStateProtocol.State.UNKNOWN, "-", 0));
+        push(PHONE, AlarmStateProtocol.State.ARMED_STAY, R2); advance(250);
+        assertSame(original, WatchAlarmStore.refreshIdentity());
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.queries.get(1).intent);
     }
 
     @Test public void passiveRenderingRefreshesNearExpiryAndCoalescesWhileItWaits() {
@@ -452,8 +581,11 @@ public final class WatchStatusRecoveryTest {
     private static final class StatusQuery {
         final String nonce;
         final Runnable failed;
+        final AlarmStateProtocol.QueryIntent intent;
         final long started = SystemClock.elapsedRealtime();
-        StatusQuery(String nonce, Runnable failed) { this.nonce = nonce; this.failed = failed; }
+        StatusQuery(String nonce, AlarmStateProtocol.QueryIntent intent, Runnable failed) {
+            this.nonce = nonce; this.intent = intent; this.failed = failed;
+        }
     }
     private static final class FakeTransport implements WatchAlarmStore.StatusTransport {
         final List<Discovery> discoveries = new ArrayList<>();
@@ -464,10 +596,10 @@ public final class WatchStatusRecoveryTest {
             if (failDiscovery) failed.run();
             else if (autoConnect) found.accept(PHONE);
         }
-        @Override public void query(Context context, String phone, String nonce, Runnable failed) {
+        @Override public void query(Context context, String phone, String nonce, AlarmStateProtocol.QueryIntent intent, Runnable failed) {
             assertEquals(PHONE, phone);
             assertTrue(AlarmStateProtocol.uuid(nonce));
-            queries.add(new StatusQuery(nonce, failed));
+            queries.add(new StatusQuery(nonce, intent, failed));
             if (autoAnswerReady) assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(nonce,
                 AlarmStateProtocol.State.DISARMED, AlarmStateProtocol.Availability.READY, R1, 0, "-",
                 AlarmStateProtocol.Evidence.ADT_QUERY, UUID.randomUUID().toString()), SystemClock.elapsedRealtime(), BOOT));

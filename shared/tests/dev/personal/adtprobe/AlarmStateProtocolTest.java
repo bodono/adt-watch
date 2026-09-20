@@ -45,12 +45,39 @@ public final class AlarmStateProtocolTest {
         assertNotNull(AlarmStateProtocol.parseReport(unavailable.encode()));
     }
     @Test public void queryAndTapKeepTheirIndependentIdentities() {
-        assertEquals(REQUEST, AlarmStateProtocol.parseQuery(AlarmStateProtocol.query(REQUEST)));
+        assertEquals(REQUEST, AlarmStateProtocol.parseQuery(AlarmStateProtocol.query(REQUEST)).request);
         AlarmStateProtocol.Tap tap = AlarmStateProtocol.parseTap(
             new AlarmStateProtocol.Tap(AlarmAction.DISARM, REQUEST, REVISION).encode());
         assertEquals(AlarmAction.DISARM, tap.action);
         assertEquals(REQUEST, tap.request); assertEquals(REVISION, tap.revision);
         assertNull(AlarmStateProtocol.parseTap(ArmExperimentProtocol.encodePrepare(AlarmAction.DISARM, REQUEST)));
+    }
+    @Test public void queryIntentRoundTripsWithoutAcquiringAnyAlarmAction() {
+        for (AlarmStateProtocol.QueryIntent intent : AlarmStateProtocol.QueryIntent.values()) {
+            byte[] encoded = AlarmStateProtocol.query(REQUEST, intent);
+            AlarmStateProtocol.Query parsed = AlarmStateProtocol.parseQuery(encoded);
+            assertNotNull(parsed); assertEquals(REQUEST, parsed.request); assertEquals(intent, parsed.intent);
+            assertArrayEquals(encoded, AlarmStateProtocol.query(parsed.request, parsed.intent));
+            assertNull(AlarmStateProtocol.parseTap(encoded));
+            assertNull(AlarmStateProtocol.parseReport(encoded));
+            assertNull(ArmExperimentProtocol.parse(encoded));
+        }
+    }
+    @Test public void absentOrLegacyQueryIntentCannotAuthorizeALogin() {
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE,
+            AlarmStateProtocol.parseQuery(AlarmStateProtocol.query(REQUEST)).intent);
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE,
+            AlarmStateProtocol.parseQuery(ascii("ADT-STATE/1\nQUERY\n" + REQUEST)).intent);
+        assertNull(AlarmStateProtocol.parseQuery(ascii("ADT-STATE/4\nQUERY\n" + REQUEST)));
+        assertNull(AlarmStateProtocol.parseQuery(ascii("ADT-STATE/1\nQUERY\n" + REQUEST + "\nUSER")));
+    }
+    @Test public void unknownOrInjectedQueryIntentsAreRejected() {
+        String prefix = "ADT-STATE/4\nQUERY\n" + REQUEST + "\n";
+        for (String bad : new String[] {"", "user", "USER ", "DISARM", "PASSIVE\nUSER", "USER\n", "USER\u0000"})
+            assertNull(AlarmStateProtocol.parseQuery(ascii(prefix + bad)));
+        assertNull(AlarmStateProtocol.parseQuery(ascii(prefix.replace(REQUEST, "-") + "USER")));
+        try { AlarmStateProtocol.query(REQUEST, null); fail("Missing intent"); }
+        catch (IllegalArgumentException expected) { }
     }
     @Test public void onlyRecognizedReportedStatesProduceAnAction() {
         assertNull(AlarmStateProtocol.action(AlarmStateProtocol.State.UNKNOWN));

@@ -1,6 +1,6 @@
 # How ADT Watch works
 
-The v0.25 architecture separates status queries from alarm execution. The phone
+The v0.26 architecture separates status queries from alarm execution. The phone
 and Wear modules share application ID `dev.personal.adtprobe` and a signing
 identity. Google Play Services carries bounded, source-matched messages between
 them. Live-query integration is undergoing validation.
@@ -43,10 +43,17 @@ The native entry screen blocks screenshots and view-state persistence, clears
 inputs on exit, and provides **Forget saved login**.
 
 `AdtSessionRecovery` enables background use only after an explicit phone test
-logs in and reads the already selected system/partition. On a status
-authentication failure the read returns that failure at once and queues one
+logs in and reads the already selected system/partition. Status queries carry
+explicit USER or PASSIVE intent. Actual watch interaction and bounded command
+confirmation reads may request recovery; notification/listener hints, background
+Tile rendering, unsolicited status reports and keep-alive reads remain PASSIVE.
+A user interaction during a passive query retires its nonce and sends a new
+USER query without extending the recovery deadline. Hints never grant USER intent.
+On a USER authentication failure the read returns that failure at once and queues one
 login attempt on the reads worker with its own 20-second budget, run under the
-query lock so status reads wait for it instead of colliding with it. After a
+query lock so status reads wait for it instead of colliding with it. Queued work
+must start within 20 seconds of the original user read and is invalidated by a
+newer sign-in or credential change. After a
 verified matching-home read commits the new cookies, one ordinary status read,
 made while the lock is still held, stores the state, and the watch receives a
 status hint whether or not that read succeeded: the sign-in answer had stopped
@@ -90,7 +97,7 @@ expiry policy or prove that ordinary status API reads renew a session. That
 requires an idle-session test. The timer's read never starts a login, and after
 a failed read or a reboot the chain stops until a read succeeds again. Process
 death removes these in-memory timers; deep sleep can delay them. If the session
-has expired, a later requested read can trigger the bounded recovery described
+has expired, a later user-initiated read can trigger the bounded recovery described
 above. There is no guarantee of uninterrupted overnight access.
 
 The client permits only fixed HTTPS GET routes on Alarm.com's website API.
@@ -205,7 +212,7 @@ coloured control.
 Pure and Robolectric tests use invented HTTP responses, inert widgets and
 simulated lifecycle events. They do not contact ADT or operate an alarm.
 Earlier personal-device checks verified the native widget route with a locked
-phone and ADT battery usage Unrestricted. They do not establish v0.25 live-query
+phone and ADT battery usage Unrestricted. They do not establish v0.26 live-query
 compatibility, session longevity or reliable overnight operation. Those require
 separate physical verification.
 

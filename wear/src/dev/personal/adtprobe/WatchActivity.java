@@ -44,7 +44,7 @@ public final class WatchActivity extends Activity {
             if (attempt != null && (!interactive() || !attempt.isActive(SystemClock.elapsedRealtime())))
                 endAttempt(commandSent ? "Check ADT for the result." : "Phone unavailable. Tap Refresh.", commandSent);
             maybeTileTap();
-            if (attempt == null && interactive()) WatchAlarmStore.refreshIfNeeded(WatchActivity.this);
+            if (attempt == null && interactive()) WatchAlarmStore.refreshIfNeeded(WatchActivity.this, AlarmStateProtocol.QueryIntent.USER);
             render(); handler.postDelayed(this, 250);
         }
     };
@@ -179,7 +179,10 @@ public final class WatchActivity extends Activity {
         MessageClient.OnMessageReceivedListener added = event -> handler.post(() -> handle(event, g)); listener = added;
         client.addListener(added).addOnSuccessListener(unused -> {
             if (!resumed || generation != g) { client.removeListener(added); return; }
-            listenerReady = true; maybeTileTap(); WatchAlarmStore.refresh(this); render();
+            listenerReady = true; maybeTileTap();
+            if (interactive()) WatchAlarmStore.refresh(this);
+            else WatchAlarmStore.refreshIfNeeded(this);
+            render();
         }).addOnFailureListener(error -> {
             if (resumed && generation == g) { feedback = "Connection unavailable. Reopen ADT Watch."; render(); }
         });

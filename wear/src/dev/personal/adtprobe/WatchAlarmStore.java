@@ -39,7 +39,7 @@ final class WatchAlarmStore {
     /** Status transport cannot carry an alarm command. Replaced with inert callbacks in tests. */
     interface StatusTransport {
         void discover(Context context, Consumer<String> found, Runnable failed);
-        void query(Context context, String phone, String nonce, Runnable failed);
+        void query(Context context, String phone, String nonce, AlarmStateProtocol.QueryIntent intent, Runnable failed);
     }
     private static StatusTransport transport = new StatusTransport() {
         @Override public void discover(Context context, Consumer<String> found, Runnable failed) {
@@ -51,17 +51,25 @@ final class WatchAlarmStore {
                 found.accept(nodes.iterator().next().getId());
             });
         }
-        @Override public void query(Context context, String phone, String nonce, Runnable failed) {
+        @Override public void query(Context context, String phone, String nonce, AlarmStateProtocol.QueryIntent intent, Runnable failed) {
             Wearable.getMessageClient(context).sendMessage(phone, AlarmStateProtocol.QUERY_PATH,
-                    AlarmStateProtocol.query(nonce)).addOnFailureListener(error -> failed.run());
+                    AlarmStateProtocol.query(nonce, intent)).addOnFailureListener(error -> failed.run());
         }
     };
 
     private static final class Recovery {
         final long started, finalBoundary;
         boolean hinted;
+        AlarmStateProtocol.QueryIntent intent;
+        long userUntil;
         long finalStarted = -1;
-        Recovery(long started, long finalBoundary) { this.started = started; this.finalBoundary = finalBoundary; }
+        Recovery(long started, long finalBoundary, AlarmStateProtocol.QueryIntent intent, long userUntil) {
+            this.started = started; this.finalBoundary = finalBoundary; this.intent = intent; this.userUntil = userUntil;
+        }
+        AlarmStateProtocol.QueryIntent intentAt(long now) {
+            return intent == AlarmStateProtocol.QueryIntent.USER && now >= started && now < userUntil
+                ? AlarmStateProtocol.QueryIntent.USER : AlarmStateProtocol.QueryIntent.PASSIVE;
+        }
         boolean live(long now) {
             long origin = finalStarted >= 0 ? finalStarted : started;
             return now >= origin && now - origin < (finalStarted >= 0 ? QUERY_MS : RECOVERY_MS);
@@ -97,8 +105,12 @@ final class WatchAlarmStore {
         final String nonce = UUID.randomUUID().toString();
         final long started;
         final Recovery owner;
+        final AlarmStateProtocol.QueryIntent intent;
         String phone;
-        Query(long started) { this.started = started; owner = recovery; }
+        Query(long started) {
+            this.started = started; owner = recovery;
+            intent = owner == null ? AlarmStateProtocol.QueryIntent.PASSIVE : owner.intentAt(started);
+        }
         boolean live(long now) { return now >= started && now - started < QUERY_MS; }
     }
 
@@ -156,14 +168,28 @@ final class WatchAlarmStore {
     }
 
     static void refresh(Context context) {
-        Context app = context.getApplicationContext();
-        MAIN.post(() -> startRecovery(app));
+        refreshFromInteraction(context, SystemClock.elapsedRealtime(), boot(context));
     }
 
-    /** Called on the main thread by visible UI; rendering cannot create a recovery loop. */
-    static synchronized boolean refreshIfNeeded(Context context) {
+    private static void refreshFromInteraction(Context context, long interaction, int interactionBoot) {
+        Context app = context.getApplicationContext();
+        // Capture before posting: a stopped main loop must not turn an old interaction into a new login.
+        MAIN.post(() -> startRecovery(app, interactionBoot >= 0 && interactionBoot == boot(app)
+            ? AlarmStateProtocol.QueryIntent.USER : AlarmStateProtocol.QueryIntent.PASSIVE, false, interaction));
+    }
+
+    /** Renderer requests are passive: Wear OS can request a tile while nobody is viewing it. */
+    static boolean refreshIfNeeded(Context context) {
+        return refreshIfNeeded(context, AlarmStateProtocol.QueryIntent.PASSIVE);
+    }
+
+    /** Actual tile entry or interactive UI can promote a background read to a user check. */
+    static synchronized boolean refreshIfNeeded(Context context, AlarmStateProtocol.QueryIntent intent) {
         if (activeSelection != null) return false;
-        if (isRefreshing()) return true;
+        if (isRefreshing()) {
+            startRecovery(context.getApplicationContext(), intent, false);
+            return true;
+        }
         long now = SystemClock.elapsedRealtime();
         int boot = boot(context);
         SharedPreferences p = prefs(context);
@@ -172,8 +198,10 @@ final class WatchAlarmStore {
         if (current.enabled && received >= 0 && now >= received && now - received < PASSIVE_FRESH_MS) return false;
         long started = p.getLong("passiveRecoveryStarted", -1);
         if (p.getInt("passiveRecoveryBoot", -1) == boot && started >= 0
-                && (now < started || now - started < PASSIVE_COOLDOWN_MS)) return false;
-        startRecovery(context.getApplicationContext());
+                && (now < started || now - started < PASSIVE_COOLDOWN_MS)
+                && (intent == AlarmStateProtocol.QueryIntent.PASSIVE
+                    || AlarmStateProtocol.QueryIntent.USER.name().equals(p.getString("recoveryIntent", "")))) return false;
+        startRecovery(context.getApplicationContext(), intent, false);
         return isRefreshing();
     }
 
@@ -186,26 +214,44 @@ final class WatchAlarmStore {
         return isRefreshing() ? recovery : null;
     }
 
-    private static synchronized void startRecovery(Context app) {
-        startRecovery(app, false);
+    private static synchronized void startRecovery(Context app, AlarmStateProtocol.QueryIntent intent, boolean hint) {
+        startRecovery(app, intent, hint, SystemClock.elapsedRealtime());
     }
 
-    private static synchronized void startRecovery(Context app, boolean hint) {
+    private static synchronized void startRecovery(Context app, AlarmStateProtocol.QueryIntent intent, boolean hint, long interaction) {
         if (activeSelection != null) return;
         long now = SystemClock.elapsedRealtime();
+        if (interaction < 0 || now < interaction || now - interaction >= RECOVERY_MS)
+            intent = AlarmStateProtocol.QueryIntent.PASSIVE;
+        long userUntil = intent == AlarmStateProtocol.QueryIntent.USER ? interaction + RECOVERY_MS : -1;
+        if (intent == AlarmStateProtocol.QueryIntent.USER && recovery != null && recovery.live(now)
+                && now - recovery.started >= RECOVERY_MS) {
+            // A fresh interaction after the original window gets a new bounded check. Repeatedly
+            // "promoting" its expired final read would otherwise retire the nonce on every UI tick.
+            cancelRecovery(); lastRefresh = -1;
+        }
         if (recovery != null && recovery.live(now)) {
-            if (hint) expediteRefresh(app, recovery, now);
+            if (intent == AlarmStateProtocol.QueryIntent.USER && recovery.intentAt(now) == AlarmStateProtocol.QueryIntent.PASSIVE) {
+                // A passive query already on the wire cannot acquire login permission. Retire its
+                // nonce and send a new user query, keeping the original recovery's deadline.
+                recovery.intent = intent;
+                recovery.userUntil = Math.min(userUntil, recovery.started + RECOVERY_MS);
+                pending = null; refreshQueued = false; scheduledRefresh = null; lastRefresh = -1;
+                prefs(app).edit().putString("recoveryIntent", intent.name()).apply();
+                startRefresh(app, recovery);
+            } else if (hint) expediteRefresh(app, recovery, now);
             return;
         }
         cancelRecovery();
         SharedPreferences p = prefs(app);
         recoverPossibleSend(p); prepareLegacyWait(p, now, boot(app));
         long boundary = uncertaintyBoundary(p, now, boot(app));
-        Recovery started = new Recovery(now, boundary >= now && boundary - now <= RECOVERY_MS ? boundary : -1);
+        Recovery started = new Recovery(now, boundary >= now && boundary - now <= RECOVERY_MS ? boundary : -1, intent, userUntil);
         started.hinted = hint;
         recovery = started;
         diagnostic("RECOVERY_START");
-        prefs(app).edit().putLong("passiveRecoveryStarted", now).putInt("passiveRecoveryBoot", boot(app)).apply();
+        prefs(app).edit().putLong("passiveRecoveryStarted", now).putInt("passiveRecoveryBoot", boot(app))
+            .putString("recoveryIntent", intent.name()).apply();
         MAIN.postDelayed(() -> expireRecovery(app, started), RECOVERY_MS);
         if (started.finalBoundary >= 0)
             MAIN.postDelayed(() -> finalBoundaryRead(app, started), Math.max(0, started.finalBoundary - now));
@@ -232,8 +278,11 @@ final class WatchAlarmStore {
                 diagnostic("DISCOVERED durationMs=" + (SystemClock.elapsedRealtime() - query.started));
                 if (!selectSource(app, query, phone, SystemClock.elapsedRealtime(), boot(app))) return;
                 try {
-                    diagnostic("QUERY_SEND");
-                    transport.query(app, phone, query.nonce, () -> MAIN.post(() -> failQuery(app, query)));
+                    // Discovery can complete much later than the interaction that started it.
+                    AlarmStateProtocol.QueryIntent intent = query.owner == null ? AlarmStateProtocol.QueryIntent.PASSIVE
+                        : query.owner.intentAt(SystemClock.elapsedRealtime());
+                    diagnostic("QUERY_SEND intent=" + intent.name());
+                    transport.query(app, phone, query.nonce, intent, () -> MAIN.post(() -> failQuery(app, query)));
                 }
                 catch (RuntimeException error) { failQuery(app, query); }
             }), () -> MAIN.post(() -> failQuery(app, query)));
@@ -292,6 +341,11 @@ final class WatchAlarmStore {
         long now = SystemClock.elapsedRealtime();
         if (recovery != expected || expected.finalStarted >= 0 || expected.finalBoundary < 0
                 || now < expected.finalBoundary || activeSelection != null || !prefs(app).getBoolean("busy", false)) return;
+        // A delayed boundary callback may still read ground truth, but cannot revive the expired
+        // interaction's permission to submit a password after the watch has been asleep.
+        if (now < expected.started || now - expected.started >= RECOVERY_MS) {
+            expected.intent = AlarmStateProtocol.QueryIntent.PASSIVE; expected.userUntil = -1;
+        }
         if (pending != null && pending.owner == expected && pending.live(now) && pending.started >= expected.finalBoundary) {
             expected.finalStarted = pending.started; // An existing qualifying query is the final attempt.
         } else {
@@ -368,7 +422,7 @@ final class WatchAlarmStore {
         Context app = context.getApplicationContext();
         MAIN.post(() -> {
             if (accept(app, source, report, SystemClock.elapsedRealtime(), boot(app)) && "-".equals(report.request))
-                startRecovery(app, true);
+                startRecovery(app, AlarmStateProtocol.QueryIntent.PASSIVE, true);
         });
     }
 
@@ -534,7 +588,8 @@ final class WatchAlarmStore {
                 .remove("token").remove("tokenIssued").apply();
         activeSelection = null;
         changed(context);
-        refresh(context);
+        // Completion/lifecycle cleanup continues the original tap; it is not a new interaction.
+        refreshFromInteraction(context, p.getLong("actionStarted", -1), p.getInt("boot", -1));
     }
 
     private static void recoverPossibleSend(SharedPreferences p) {

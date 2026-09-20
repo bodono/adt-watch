@@ -298,7 +298,7 @@ public final class WatchActivityFlowTest {
         WatchAlarmStore.StatusTransport originalTransport = ReflectionHelpers.getStaticField(WatchAlarmStore.class, "transport");
         ReflectionHelpers.setStaticField(WatchAlarmStore.class, "transport", new WatchAlarmStore.StatusTransport() {
             @Override public void discover(Context ignored, Consumer<String> found, Runnable failed) { found.accept(PHONE); }
-            @Override public void query(Context ignored, String phone, String nonce, Runnable failed) { }
+            @Override public void query(Context ignored, String phone, String nonce, AlarmStateProtocol.QueryIntent intent, Runnable failed) { }
         });
         try { for (AlarmAction action : AlarmAction.values()) {
             closeActivity(); resetStore(); sent.clear();

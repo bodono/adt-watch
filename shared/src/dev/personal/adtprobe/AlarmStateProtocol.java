@@ -16,6 +16,8 @@ public final class AlarmStateProtocol {
     public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, SETUP, OFFLINE }
     public enum DeclineReason { STATE_CHANGED, UNAVAILABLE, ALREADY_SATISFIED }
     public enum Evidence { ADT_NOTIFICATION, PHONE_CHECK, ADT_QUERY }
+    /** Only a user-initiated check may recover an expired session with saved credentials. */
+    public enum QueryIntent { USER, PASSIVE }
     private AlarmStateProtocol() { }
     public static AlarmAction action(State state) {
         if (state == State.DISARMED) return AlarmAction.ARM_STAY;
@@ -31,13 +33,24 @@ public final class AlarmStateProtocol {
         return new String(bytes, StandardCharsets.US_ASCII).split("\n", -1);
     }
     private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.US_ASCII); }
-    public static byte[] query(String request) {
-        if (!uuid(request)) throw new IllegalArgumentException("Invalid query");
-        return bytes("ADT-STATE/1\nQUERY\n" + request);
+    /** Unspecified intent is passive; background status work must never acquire login permission. */
+    public static byte[] query(String request) { return query(request, QueryIntent.PASSIVE); }
+    public static byte[] query(String request, QueryIntent intent) {
+        if (!uuid(request) || intent == null) throw new IllegalArgumentException("Invalid query");
+        return bytes("ADT-STATE/4\nQUERY\n" + request + "\n" + intent.name());
     }
-    public static String parseQuery(byte[] bytes) {
+    public static final class Query {
+        public final String request;
+        public final QueryIntent intent;
+        private Query(String request, QueryIntent intent) { this.request = request; this.intent = intent; }
+    }
+    public static Query parseQuery(byte[] bytes) {
         String[] f = fields(bytes);
-        return f != null && f.length == 3 && "ADT-STATE/1".equals(f[0]) && "QUERY".equals(f[1]) && uuid(f[2]) ? f[2] : null;
+        if (f == null || f.length < 3 || !"QUERY".equals(f[1]) || !uuid(f[2])) return null;
+        if (f.length == 3 && "ADT-STATE/1".equals(f[0])) return new Query(f[2], QueryIntent.PASSIVE);
+        if (f.length != 4 || !"ADT-STATE/4".equals(f[0])) return null;
+        try { return new Query(f[2], QueryIntent.valueOf(f[3])); }
+        catch (IllegalArgumentException error) { return null; }
     }
     public static final class Report {
         public final String request, revision, completedRequest, observationId;

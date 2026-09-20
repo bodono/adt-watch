@@ -49,7 +49,7 @@ public final class AdtSessionRecoveryTest {
         app.getSharedPreferences("adt_portal_binding", 0).edit().clear().commit();
         assertTrue(AdtPortalSession.bind(app, "system-1", "partition-1"));
         ReflectionHelpers.setStaticField(AdtSessionRecovery.class, "websiteOwner", 0L);
-        ReflectionHelpers.setStaticField(AdtSessionRecovery.class, "queuedElapsed", -1L);
+        ReflectionHelpers.setStaticField(AdtSessionRecovery.class, "queuedAttempt", null);
         app.getSharedPreferences(PhoneAlarmState.PREFERENCES, 0).edit().clear().commit();
         Settings.Global.putInt(app.getContentResolver(), Settings.Global.BOOT_COUNT, 3);
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "storageFailed", false);
@@ -100,10 +100,13 @@ public final class AdtSessionRecoveryTest {
     private long deadline() { return SystemClock.elapsedRealtime() + 20_000; }
     /** The production sequence: the read returns its failure, the queued task runs later on the reads worker. */
     private AdtPortalClient.Result recover(AdtPortalClient.Result result) {
-        if (!AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), result)) return result;
+        if (!queue(result)) return result;
         assertEquals(1, scheduled.size());
         scheduled.remove(0).run();
         return PhoneAlarmState.snapshot(app).availability == AlarmStateProtocol.Availability.READY ? response : result;
+    }
+    private boolean queue(AdtPortalClient.Result result) {
+        return AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), result, SystemClock.elapsedRealtime());
     }
     private void allowNextAttempt() {
         app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).edit().putLong("attemptWall", 1).commit();
@@ -176,10 +179,10 @@ public final class AdtSessionRecoveryTest {
     @Test public void aFailedReadReturnsAtOnceAndRecoveryRunsLaterWithItsOwnBudget() {
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
         AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
-        assertTrue(AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), original));
+        assertTrue(queue(original));
         assertEquals("The read that noticed did not log in", 1, logins);
         assertEquals(1, scheduled.size());
-        assertFalse("One queued task at a time", AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), original));
+        assertFalse("One queued task at a time", queue(original));
         assertEquals(1, scheduled.size());
         ReentrantLock queryLock = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "QUERY_LOCK");
         AdtSessionRecovery.readOperation = (session, binding, deadline) -> {
@@ -195,6 +198,63 @@ public final class AdtSessionRecoveryTest {
         assertFalse(queryLock.isLocked());
         assertTrue("The next expiry can queue again", scheduled.isEmpty());
     }
+    @Test public void recoveryRejectsMissingFutureAndExpiredUserDemand() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        long now = SystemClock.elapsedRealtime();
+        assertFalse(AdtSessionRecovery.recoverLater(app, binding, original, -1));
+        assertFalse(AdtSessionRecovery.recoverLater(app, binding, original, now + 1));
+        ShadowSystemClock.advanceBy(Duration.ofMillis(AdtSessionRecovery.MAX_QUEUE_AGE_MS));
+        assertFalse(AdtSessionRecovery.recoverLater(app, binding, original, now));
+        assertTrue(scheduled.isEmpty()); assertEquals(1, logins);
+    }
+    @Test public void delayedQueuedRecoveryDoesNotReviveAnExpiredUserRequest() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        long requested = SystemClock.elapsedRealtime();
+        ShadowSystemClock.advanceBy(Duration.ofSeconds(8)); // The preceding status GET used time.
+        assertTrue(AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), original, requested));
+        ShadowSystemClock.advanceBy(Duration.ofMillis(AdtSessionRecovery.MAX_QUEUE_AGE_MS - 8_000));
+        scheduled.remove(0).run();
+        assertEquals("Queue age includes the status read, not merely time since enqueue", 1, logins);
+        assertEquals(0, phoneReads); assertEquals(0, published);
+        assertNull(ReflectionHelpers.getStaticField(AdtSessionRecovery.class, "queuedAttempt"));
+    }
+    @Test public void expiredCallbackCannotConsumeTheNewerQueuedRequest() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        assertTrue(queue(original)); Runnable old = scheduled.remove(0);
+        ShadowSystemClock.advanceBy(Duration.ofMillis(AdtSessionRecovery.MAX_QUEUE_AGE_MS));
+        assertTrue(queue(original)); Runnable current = scheduled.remove(0);
+        old.run();
+        assertEquals("The old callback is inert", 1, logins);
+        assertFalse("It did not clear the current queue's deduplication token", queue(original));
+        current.run();
+        assertEquals(2, logins); assertEquals(1, phoneReads); assertEquals(1, published);
+    }
+    @Test public void queuedLoginStartsOnlyForTheSessionAndCredentialsThatNeededIt() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        assertTrue(queue(original));
+        website = AdtSessionRecovery.beginInteractiveSignIn();
+        AdtSessionRecovery.endInteractiveSignIn(website); website = 0;
+        scheduled.remove(0).run();
+        assertEquals("A newer interactive sign-in retired the queued authentication failure", 1, logins);
+        assertTrue(queue(original));
+        version = UUID.randomUUID().toString();
+        scheduled.remove(0).run();
+        assertEquals("Changed credentials cannot be substituted into an older request", 1, logins);
+        assertEquals(0, phoneReads); assertEquals(0, published);
+    }
+    @Test public void recoveryAcceptedBeforeQueueExpiryRetainsItsOwnLoginBudget() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        assertTrue(queue(failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
+        ShadowSystemClock.advanceBy(Duration.ofMillis(AdtSessionRecovery.MAX_QUEUE_AGE_MS - 1));
+        scheduled.remove(0).run();
+        assertEquals(2, logins);
+        assertEquals(AdtSessionRecovery.BACKGROUND_BUDGET_MS, loginDeadline - loginStarted);
+    }
     @Test public void aFailedRecoveryStoresNothing() {
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
         loginStatus = AdtLoginClient.Status.UNAVAILABLE;
@@ -207,7 +267,7 @@ public final class AdtSessionRecoveryTest {
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
         PhoneAlarmState.queryOperation = (context, deadline) -> { phoneReads++; return failure(AdtPortalClient.Status.UNAVAILABLE); };
         AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
-        assertTrue(AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), original));
+        assertTrue(queue(original));
         scheduled.remove(0).run();
         assertEquals(2, logins); assertEquals(1, phoneReads);
         assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(app).availability);
@@ -216,14 +276,14 @@ public final class AdtSessionRecoveryTest {
     @Test public void nothingIsQueuedForNetworkFailuresOrWhilePausedCoolingDownOrSigningIn() {
         AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready);
-        assertFalse(AdtSessionRecovery.recoverLater(app, binding, failure(AdtPortalClient.Status.UNAVAILABLE)));
-        assertFalse(AdtSessionRecovery.recoverLater(app, binding, response));
-        assertFalse("Cooling down after the test", AdtSessionRecovery.recoverLater(app, binding, failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
+        assertFalse(queue(failure(AdtPortalClient.Status.UNAVAILABLE)));
+        assertFalse(queue(response));
+        assertFalse("Cooling down after the test", queue(failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
         allowNextAttempt(); website = AdtSessionRecovery.beginInteractiveSignIn();
-        assertFalse("Sign-in page open", AdtSessionRecovery.recoverLater(app, binding, failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
+        assertFalse("Sign-in page open", queue(failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
         AdtSessionRecovery.endInteractiveSignIn(website); website = 0;
         app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).edit().putBoolean("blocked", true).commit();
-        assertFalse("Paused", AdtSessionRecovery.recoverLater(app, binding, failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
+        assertFalse("Paused", queue(failure(AdtPortalClient.Status.LOGIN_REQUIRED)));
         assertTrue(scheduled.isEmpty()); assertEquals(1, logins);
     }
     @Test public void changedCredentialsRequireAnotherExplicitTest() {

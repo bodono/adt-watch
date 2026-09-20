@@ -10,7 +10,9 @@ import java.util.concurrent.TimeUnit;
 /** Shares only normalized reported alarm state with the approved companion. */
 final class PhoneStateLink {
     private PhoneStateLink() { }
-    static void reply(Context context, String source, String request) {
+    static void reply(Context context, String source, AlarmStateProtocol.Query query) {
+        if (query == null) return;
+        String request = query.request;
         if (!WatchProtocol.validNodeId(source) || !AlarmStateProtocol.uuid(request)) return;
         RoutineAccess.Snapshot access = RoutineAccess.snapshot(context);
         AlarmStateProtocol.Report report;
@@ -19,7 +21,7 @@ final class PhoneStateLink {
                 AlarmStateProtocol.Availability.SETUP, "-", 0);
         } else {
             if (!source.equals(access.nodeId)) return;
-            PhoneAlarmState.refresh(context);
+            PhoneAlarmState.refresh(context, PhoneAlarmState.REUSE_MS, query.intent);
             if (!RoutineAccess.stillValid(context, access)) return;
             report = report(context, request);
         }

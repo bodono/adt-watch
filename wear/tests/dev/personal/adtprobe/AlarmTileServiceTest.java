@@ -80,6 +80,8 @@ public final class AlarmTileServiceTest {
         idle();
         assertFalse(result.isDone());
         assertEquals(1, transport.nonces.size());
+        assertEquals("Renderer requests alone cannot request a password login",
+                AlarmStateProtocol.QueryIntent.PASSIVE, transport.intents.get(0));
         reply(0, 0);
         advance(100);
         assertTrue(result.isDone());
@@ -183,11 +185,63 @@ public final class AlarmTileServiceTest {
         idle();
         ListenableFuture<TileBuilders.Tile> tile = request(); idle();
         assertEquals(1, transport.nonces.size());
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.intents.get(0));
         assertFalse(entered.isDone());
         reply(0, 0); advance(100);
         assertTrue(entered.isDone());
         assertTrue(tile.isDone());
         assertNull(entered.get());
+    }
+
+    @Test public void actualEntryPromotesAnExistingRendererQueryAndRetiresItsReply() throws Exception {
+        ListenableFuture<TileBuilders.Tile> tile = request(); idle();
+        Object recovery = WatchAlarmStore.refreshIdentity();
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.intents.get(0));
+        EventBuilders.TileInteractionEvent enter = new EventBuilders.TileInteractionEvent.Builder(
+                1, EventBuilders.TileInteractionEvent.ENTER).build();
+        ListenableFuture<Void> entered = service.onRecentInteractionEventsAsync(Collections.singletonList(enter)); idle();
+        assertSame(recovery, WatchAlarmStore.refreshIdentity());
+        assertEquals(2, transport.nonces.size());
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.intents.get(1));
+        assertFalse(WatchAlarmStore.accept(service, PHONE, new AlarmStateProtocol.Report(
+                transport.nonces.get(0), AlarmStateProtocol.State.UNKNOWN,
+                AlarmStateProtocol.Availability.NO_ACCESS, "-", 0), SystemClock.elapsedRealtime(), BOOT));
+        reply(1, 0); advance(100);
+        assertTrue(entered.isDone()); assertTrue(tile.isDone());
+        assertTrue(tileText(tile.get()).contains("Arm Stay"));
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test public void legacyEntryCallbackAlsoRequestsAUserCheck() {
+        service.onTileEnterEvent(new EventBuilders.TileEnterEvent.Builder().build()); idle();
+        assertEquals(AlarmStateProtocol.QueryIntent.USER, transport.intents.get(0));
+    }
+
+    @Test public void oldAndFutureEnterEventsNeverPromoteARendererQuery() {
+        request(); idle();
+        long now = System.currentTimeMillis();
+        for (long timestamp : new long[] {0, now - 10_001, now + 60_000, Long.MAX_VALUE}) {
+            EventBuilders.TileInteractionEvent enter = new EventBuilders.TileInteractionEvent.Builder(
+                    1, EventBuilders.TileInteractionEvent.ENTER)
+                    .setTimestamp(java.time.Instant.ofEpochMilli(timestamp)).build();
+            service.onRecentInteractionEventsAsync(Collections.singletonList(enter)); idle();
+            assertEquals("An ambient event must not retire and promote the passive query", 1, transport.nonces.size());
+            assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.intents.get(0));
+        }
+    }
+
+    @Test public void aRecentEntryFollowedByLeaveIsPassiveEvenWhenEventsArriveOutOfOrder() {
+        request(); idle();
+        long now = System.currentTimeMillis();
+        EventBuilders.TileInteractionEvent enter = new EventBuilders.TileInteractionEvent.Builder(
+                1, EventBuilders.TileInteractionEvent.ENTER)
+                .setTimestamp(java.time.Instant.ofEpochMilli(now - 1)).build();
+        EventBuilders.TileInteractionEvent leave = new EventBuilders.TileInteractionEvent.Builder(
+                1, EventBuilders.TileInteractionEvent.LEAVE)
+                .setTimestamp(java.time.Instant.ofEpochMilli(now)).build();
+        service.onRecentInteractionEventsAsync(java.util.Arrays.asList(leave, enter)); idle();
+        assertEquals(1, transport.nonces.size());
+        assertEquals(AlarmStateProtocol.QueryIntent.PASSIVE, transport.intents.get(0));
     }
 
     @Test public void progressDoesNotUseRedrawAllowanceBeforeTheOriginalResponseIsReady() throws Exception {
@@ -351,7 +405,8 @@ public final class AlarmTileServiceTest {
 
     private static final class FakeTransport implements WatchAlarmStore.StatusTransport {
         final List<String> nonces = new ArrayList<>();
+        final List<AlarmStateProtocol.QueryIntent> intents = new ArrayList<>();
         @Override public void discover(Context context, Consumer<String> found, Runnable failed) { found.accept(PHONE); }
-        @Override public void query(Context context, String phone, String nonce, Runnable failed) { nonces.add(nonce); }
+        @Override public void query(Context context, String phone, String nonce, AlarmStateProtocol.QueryIntent intent, Runnable failed) { nonces.add(nonce); intents.add(intent); }
     }
 }

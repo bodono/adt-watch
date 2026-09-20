@@ -15,10 +15,21 @@ final class AdtSessionRecovery {
     static final long RETRY_DELAY_MS = 5 * 60_000;
     /** A background login plus its verifying read get this much, independent of the read that noticed. */
     static final long BACKGROUND_BUDGET_MS = 20_000;
+    /** A queued login may start only while the user request that asked for it is this recent. */
+    static final long MAX_QUEUE_AGE_MS = 20_000;
     private static final ReentrantLock LOGIN_LOCK = new ReentrantLock();
     private static final Object COOKIE_LOCK = new Object();
     private static long epoch, websiteOwner, testGeneration;
-    private static long queuedElapsed = -1;
+    private static QueuedAttempt queuedAttempt;
+
+    private static final class QueuedAttempt {
+        final long requestedElapsed, sessionEpoch;
+        final String credentialVersion;
+        QueuedAttempt(long requestedElapsed, long sessionEpoch, String credentialVersion) {
+            this.requestedElapsed = requestedElapsed; this.sessionEpoch = sessionEpoch;
+            this.credentialVersion = credentialVersion;
+        }
+    }
 
     interface Sessions { AdtPortalClient.Session create(Context context, long deadline) throws Exception; }
     interface Login { AdtLoginClient.Result login(AdtPortalClient.Session session, String username, char[] password, long deadline); }
@@ -79,31 +90,47 @@ final class AdtSessionRecovery {
     }
 
     /**
-     * Worker only, after a failed status GET, which returns its failure at once. Queues one
+     * Worker only, after a user-requested status GET, which returns its failure at once. The
+     * original request arrival time bounds queue lifetime; passive reads must never call this.
+     * Queues one
      * bounded login on the reads worker with its own budget rather than the read's leftover
      * deadline; after a verified matching-home read, PhoneAlarmState reads once through the
      * normal path and tells the watch. Never replays a watch command.
      */
-    static boolean recoverLater(Context context, AdtPortalSession.Binding binding, AdtPortalClient.Result failed) {
-        if (!authenticationFailure(failed) || binding == null) return false;
+    static boolean recoverLater(Context context, AdtPortalSession.Binding binding, AdtPortalClient.Result failed,
+            long requestedElapsed) {
+        if (!authenticationFailure(failed) || binding == null
+                || !recentRequest(requestedElapsed, SystemClock.elapsedRealtime())) return false;
         Context app = context.getApplicationContext();
         if (!worthAttempting(app)) return false;
+        final QueuedAttempt next;
         synchronized (COOKIE_LOCK) {
-            // One queued task at a time; a task that never started stops throttling after the budget.
+            // A timer delayed behind other work must not revive an old request. Once it expires,
+            // a newer user request can replace it; identity checks make the old callback inert.
             long now = SystemClock.elapsedRealtime();
-            if (queuedElapsed >= 0 && now >= queuedElapsed && now - queuedElapsed < BACKGROUND_BUDGET_MS) return false;
-            queuedElapsed = now;
+            if (!recentRequest(requestedElapsed, now)) return false;
+            if (queuedAttempt != null && recentRequest(queuedAttempt.requestedElapsed, now)) return false;
+            String version = credentials.version(app);
+            if (version == null || version.isEmpty()) return false;
+            queuedAttempt = next = new QueuedAttempt(requestedElapsed, epoch, version);
         }
         try {
             PhoneAlarmState.scheduleRecovery(app, () -> {
-                synchronized (COOKIE_LOCK) { queuedElapsed = -1; }
-                return usable(attempt(app, binding, SystemClock.elapsedRealtime() + BACKGROUND_BUDGET_MS, false).result);
+                synchronized (COOKIE_LOCK) {
+                    if (queuedAttempt != next) return false;
+                    queuedAttempt = null;
+                }
+                return usable(attempt(app, binding, SystemClock.elapsedRealtime() + BACKGROUND_BUDGET_MS, false, next).result);
             });
         } catch (RuntimeException error) {
-            synchronized (COOKIE_LOCK) { queuedElapsed = -1; }
+            synchronized (COOKIE_LOCK) { if (queuedAttempt == next) queuedAttempt = null; }
             return false;
         }
         return true;
+    }
+
+    private static boolean recentRequest(long requestedElapsed, long now) {
+        return requestedElapsed >= 0 && now >= requestedElapsed && now - requestedElapsed < MAX_QUEUE_AGE_MS;
     }
 
     /** The cheap part of attempt's own checks, so a signed-out watch poll does not queue no-op work. */
@@ -151,11 +178,19 @@ final class AdtSessionRecovery {
     }
 
     private static Attempt attempt(Context app, AdtPortalSession.Binding binding, long deadline, boolean manual) {
+        return attempt(app, binding, deadline, manual, null);
+    }
+
+    private static Attempt attempt(Context app, AdtPortalSession.Binding binding, long deadline, boolean manual,
+            QueuedAttempt queued) {
         String version = credentials.version(app);
         if (version == null || version.isEmpty() || binding == null) return new Attempt(null, "DISABLED");
         long initialEpoch;
         final long startedTest;
         synchronized (COOKIE_LOCK) {
+            if (!manual && (queued == null || !recentRequest(queued.requestedElapsed, SystemClock.elapsedRealtime())
+                    || epoch != queued.sessionEpoch || !version.equals(queued.credentialVersion)))
+                return new Attempt(null, "CANCELLED");
             if (websiteOwner != 0) return new Attempt(null, "WEBSITE_OPEN");
             initialEpoch = epoch; startedTest = testGeneration;
         }

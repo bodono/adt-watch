@@ -8,7 +8,7 @@ import com.google.android.gms.wearable.WearableListenerService;
 public final class WatchLinkService extends WearableListenerService {
     @Override public void onMessageReceived(MessageEvent event) {
         if (event != null && AlarmStateProtocol.QUERY_PATH.equals(event.getPath())) {
-            String request = AlarmStateProtocol.parseQuery(event.getData());
+            AlarmStateProtocol.Query request = AlarmStateProtocol.parseQuery(event.getData());
             if (request != null) PhoneStateLink.reply(this, event.getSourceNodeId(), request);
             return;
         }
@@ -53,7 +53,7 @@ public final class WatchLinkService extends WearableListenerService {
             // checks must see. Only a read that began after the tap arrived is shared. A tap whose
             // read did not complete (lock wait over, read failed) is declined; the display keeps
             // whatever observation it had.
-            PhoneAlarmState.Snapshot state = PhoneAlarmState.refresh(context, 0);
+            PhoneAlarmState.Snapshot state = PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
             if (!state.verified) {
                 ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
                     AlarmStateProtocol.DeclineReason.UNAVAILABLE);

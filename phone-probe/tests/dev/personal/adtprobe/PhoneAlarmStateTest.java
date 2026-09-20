@@ -29,6 +29,9 @@ public final class PhoneAlarmStateTest {
     private PhoneAlarmState.Query oldQuery;
     private PhoneAlarmState.Schedule oldSchedule;
     private PhoneAlarmState.Publish oldPublish;
+    private PhoneAlarmState.Recover oldRecover;
+    private int recoveries;
+    private long recoveryRequested;
     private PhoneAlarmState.Schedule oldKeepAlive;
     private final List<ScheduledRead> keepAlives = new ArrayList<>();
     private int published;
@@ -44,6 +47,10 @@ public final class PhoneAlarmStateTest {
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
         oldQuery = PhoneAlarmState.queryOperation; oldSchedule = PhoneAlarmState.scheduleOperation;
         oldPublish = PhoneAlarmState.publishOperation; PhoneAlarmState.publishOperation = app -> published++;
+        oldRecover = PhoneAlarmState.recoveryOperation;
+        PhoneAlarmState.recoveryOperation = (app, binding, result, requested) -> {
+            recoveries++; recoveryRequested = requested; return true;
+        };
         oldKeepAlive = PhoneAlarmState.keepAliveOperation;
         PhoneAlarmState.keepAliveOperation = (action, delay) -> keepAlives.add(new ScheduledRead(action, delay));
         PhoneAlarmState.scheduleOperation = (action, delay) -> { };
@@ -53,6 +60,7 @@ public final class PhoneAlarmStateTest {
     @After public void finish() {
         PhoneAlarmState.queryOperation = oldQuery; PhoneAlarmState.scheduleOperation = oldSchedule;
         PhoneAlarmState.publishOperation = oldPublish; PhoneAlarmState.keepAliveOperation = oldKeepAlive;
+        PhoneAlarmState.recoveryOperation = oldRecover;
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
     }
     @Test public void legacyManualOrNotificationCacheCannotSupplyState() {
@@ -255,6 +263,60 @@ public final class PhoneAlarmStateTest {
         assertTrue(scheduled.isEmpty());
         assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
     }
+    @Test public void idleNotificationsAndPassiveWatchQueriesCannotQueueLogin() {
+        bind(); captureSchedule(); answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        for (int i = 0; i < 3; i++) {
+            PhoneAlarmState.hint(context); runNext(0);
+            // The notification's report makes the watch send another query, also PASSIVE.
+            PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.PASSIVE);
+            advance(5 * 60_000);
+        }
+        assertEquals(6, queries);
+        assertEquals(3, published);
+        assertEquals("Neither side of the idle notification loop may submit credentials", 0, recoveries);
+        assertEquals(AlarmStateProtocol.Availability.NO_ACCESS, PhoneAlarmState.snapshot(context).availability);
+    }
+    @Test public void onlyAnExplicitUserQueryMayRecoverAnAuthenticationFailure() {
+        bind(); answer = failure(AdtPortalClient.Status.VERIFY_LOGIN);
+        PhoneAlarmState.refresh(context, 0);
+        PhoneAlarmState.refresh(context, 0, (AlarmStateProtocol.QueryIntent) null);
+        assertEquals("Omitted or invalid intent fails closed", 0, recoveries);
+        advance(1); long requested = SystemClock.elapsedRealtime();
+        PhoneAlarmState.Snapshot value = PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+        assertEquals(1, recoveries); assertEquals(requested, recoveryRequested);
+        assertFalse(value.verified);
+        assertEquals("The failed read is returned immediately", AlarmStateProtocol.Availability.NO_ACCESS, value.availability);
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+        assertEquals("Network failures are not login failures", 1, recoveries);
+    }
+    @Test public void expiredOrReplacedUserReadsCannotQueueLogin() {
+        bind(); answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        PhoneAlarmState.queryOperation = (app, deadline) -> { advance(8_001); return answer; };
+        PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+        assertEquals(0, recoveries);
+        PhoneAlarmState.queryOperation = (app, deadline) -> {
+            AdtPortalSession.bind(app, "new-system", "new-partition"); return answer;
+        };
+        PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+        assertEquals(0, recoveries);
+    }
+    @Test public void postRecoveryReadCannotQueueAnotherLogin() {
+        bind(); captureSchedule(); answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        PhoneAlarmState.scheduleRecovery(context, () -> true); runNext(0);
+        assertEquals(1, queries); assertEquals(1, published);
+        assertEquals(0, recoveries);
+    }
+    @Test public void delayedCommandConfirmationCannotReviveLoginDemand() {
+        bind(); captureSchedule(); PhoneAlarmState.Snapshot before = read();
+        assertTrue(PhoneAlarmState.beginCommand(context, before.revision, AlarmAction.ARM_STAY));
+        answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        advance(PhoneAlarmState.COMMAND_CONFIRMATION_MILLIS);
+        runNext(PhoneAlarmState.CONFIRMATION_POLL_MS);
+        assertEquals("The final poll may still read ADT", 2, queries);
+        assertEquals("An expired command cannot create a login later", 0, recoveries);
+        assertTrue(scheduled.isEmpty());
+    }
     @Test public void notificationsDuringAReadPreserveOneTrailingFreshRead() {
         bind(); captureSchedule();
         PhoneAlarmState.queryOperation = (app, deadline) -> {
@@ -330,15 +392,19 @@ public final class PhoneAlarmStateTest {
         first.action.run();
         assertEquals("A superseded keep-alive does nothing", before, queries);
         advance(5 * 60_000);
-        boolean[] quiet = {false};
-        PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; quiet[0] = PhoneAlarmState.keepAliveRead(); return answer; };
         second.action.run();
         assertEquals("Ten idle minutes after the last read, the phone reads again", before + 1, queries);
-        assertTrue("...as a keep-alive read, which never queues a login", quiet[0]);
-        assertFalse(PhoneAlarmState.keepAliveRead());
         assertEquals("...and that read keeps the chain going", 1, keepAlives.size());
         assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
         assertEquals("An unchanged state is not worth waking the watch for", 0, published);
+    }
+    @Test public void expiredKeepAliveCannotQueueLoginOrPublishAFailedRead() {
+        bind(); read(); ScheduledRead keepAlive = keepAlives.remove(0);
+        answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        advance(PhoneAlarmState.KEEP_ALIVE_MS); keepAlive.action.run();
+        assertEquals(2, queries); assertEquals(0, recoveries); assertEquals(0, published);
+        assertTrue(keepAlives.isEmpty());
+        assertEquals(AlarmStateProtocol.Availability.NO_ACCESS, PhoneAlarmState.snapshot(context).availability);
     }
     @Test public void theKeepAliveStopsAfterAFailedReadOrRebootUntilAReadSucceedsAgain() {
         bind(); read(); ScheduledRead keepAlive = keepAlives.remove(0);

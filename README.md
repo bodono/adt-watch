@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app on a paired Android phone. It is not affiliated with
 or supported by ADT or Alarm.com.
 
-The v0.25 integration uses a read-only ADT website query for status and native
+The v0.26 integration uses a read-only ADT website query for status and native
 ADT scene widgets for alarm requests. This version is being validated; earlier
 personal-device checks do not establish reliability of the new live-query flow.
 
@@ -37,7 +37,10 @@ The helper does not extract credentials from that page; WebView retains its
 session cookies. Optional **Automatic ADT login…** lets you enter credentials
 in a separate native screen, encrypted on the phone using Android Keystore.
 After **Save and test automatic login** verifies the selected home, an expired
-session can trigger one automatic re-login and a fresh status read. Additional
+session can trigger one automatic re-login and a fresh status read when you
+open or refresh the watch interface. Notifications, background Tile rendering
+and idle status checks only use the existing session; they cannot submit your
+saved password. Additional
 verification or rejected credentials pause recovery until you check it on the
 phone; a login page the helper cannot read is retried later. The helper never
 retries an alarm command.
@@ -64,7 +67,8 @@ notification prompts an immediate fresh read; it never supplies the alarm state.
 After a successful status read, the phone schedules another ten minutes later
 as a best-effort attempt to reduce idle session expiry. Whether these API reads
 extend ADT's server session still needs an idle-session test. The timer's read
-never starts a login itself, and it stops after a failed read.
+never starts a login, and it stops after a failed read. Status hints sent to the
+watch also stay passive, so a login alert cannot create another automatic login.
 Status observations expire after at most 60 seconds. Their age means
 time since the query, not time since the alarm last changed. This is a backend
 status query, not a forced physical-panel poll. Wear OS controls Tile scheduling,

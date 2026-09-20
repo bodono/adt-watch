@@ -46,10 +46,13 @@ final class PhoneAlarmState {
     static Publish publishOperation = PhoneStateLink::publish;
     static Schedule keepAliveOperation = (action, delay) -> READS.schedule(action, delay, TimeUnit.MILLISECONDS);
     private static final AtomicLong KEEP_ALIVE_GENERATION = new AtomicLong();
-    private static final ThreadLocal<Boolean> KEEP_ALIVE_READ = new ThreadLocal<>();
     private static boolean storageFailed;
     interface Query { AdtPortalClient.Result query(Context context, long deadline); }
     static Query queryOperation = PhoneAlarmState::queryPortal;
+    interface Recover {
+        boolean attempt(Context context, AdtPortalSession.Binding binding, AdtPortalClient.Result result, long requestedElapsed);
+    }
+    static Recover recoveryOperation = AdtSessionRecovery::recoverLater;
     private PhoneAlarmState() { }
 
     static final class Snapshot {
@@ -118,6 +121,15 @@ final class PhoneAlarmState {
      * progress, or whose own read failed, is answered from the ledger with verified false.
      */
     static Snapshot refresh(Context context, long reuseMillis, long notBeforeElapsed) {
+        return refresh(context, reuseMillis, notBeforeElapsed, AlarmStateProtocol.QueryIntent.PASSIVE);
+    }
+
+    /** Only a recent user interaction may turn a failed status read into a credential login. */
+    static Snapshot refresh(Context context, long reuseMillis, AlarmStateProtocol.QueryIntent intent) {
+        return refresh(context, reuseMillis, -1, intent);
+    }
+
+    private static Snapshot refresh(Context context, long reuseMillis, long notBeforeElapsed, AlarmStateProtocol.QueryIntent intent) {
         Context app = context.getApplicationContext();
         AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
         if (binding == null) return snapshot(app);
@@ -142,7 +154,7 @@ final class PhoneAlarmState {
             }
             long started = SystemClock.elapsedRealtime();
             int queryBoot = boot(app);
-            diagnostic("QUERY_START");
+            diagnostic("QUERY_START intent=" + (intent == AlarmStateProtocol.QueryIntent.USER ? "USER" : "PASSIVE"));
             AdtPortalClient.Result result = queryOperation.query(app, deadline);
             long received = SystemClock.elapsedRealtime();
             diagnostic("QUERY_RESULT durationMs=" + Math.max(0, received - started)
@@ -156,6 +168,8 @@ final class PhoneAlarmState {
                     failed(app, binding, AdtPortalClient.Status.UNAVAILABLE); return snapshot(app);
                 }
                 if (result.status != AdtPortalClient.Status.READY && result.status != AdtPortalClient.Status.BUSY) {
+                    if (intent == AlarmStateProtocol.QueryIntent.USER && AdtSessionRecovery.authenticationFailure(result))
+                        recoveryOperation.attempt(app, binding, result, arrived);
                     failed(app, binding, result.status); return snapshot(app);
                 }
                 AdtLiveLedger ledger = read(preferences(app), binding);
@@ -216,7 +230,10 @@ final class PhoneAlarmState {
             // Only a read begun after the request can confirm it; a recent one from the watch's
             // own query is reused. The watch polls on its own, so a hint goes out only on change.
             Snapshot before = snapshot(app);
-            Snapshot value = refresh(app, REUSE_MS, requestStarted);
+            // A delayed final poll may still settle the result, but cannot revive old login demand.
+            AlarmStateProtocol.QueryIntent intent = SystemClock.elapsedRealtime() < deadline
+                ? AlarmStateProtocol.QueryIntent.USER : AlarmStateProtocol.QueryIntent.PASSIVE;
+            Snapshot value = refresh(app, REUSE_MS, requestStarted, intent);
             if (changed(before, value)) publishOperation.publish(app);
             if (value.pending && SystemClock.elapsedRealtime() < deadline) scheduleResultRead(app, request, deadline);
         }, CONFIRMATION_POLL_MS);
@@ -326,14 +343,9 @@ final class PhoneAlarmState {
         }
         diagnostic("KEEP_ALIVE");
         Snapshot before = snapshot(app);
-        Snapshot value;
-        KEEP_ALIVE_READ.set(Boolean.TRUE);
-        try { value = refresh(app, 0); } finally { KEEP_ALIVE_READ.remove(); }
+        Snapshot value = refresh(app, 0);
         if (value.verified && before.state != value.state) publishOperation.publish(app);
     }
-
-    /** True on a thread inside the keep-alive's own read. */
-    static boolean keepAliveRead() { return Boolean.TRUE.equals(KEEP_ALIVE_READ.get()); }
 
     private static void diagnostic(String event) {
         Log.i("AdtPhoneStatus", SystemClock.elapsedRealtime() + " " + event);
@@ -374,15 +386,14 @@ final class PhoneAlarmState {
             // itself reads the saved system to prove the binding when it does not.
             AdtPortalClient.Session portal = session.get(remaining, TimeUnit.MILLISECONDS);
             AdtPortalClient.Result result = new AdtPortalClient(portal).status(binding.systemId, binding.partitionId, deadline);
+            // Validate the session epoch on failures too: an old session's 401 must not
+            // queue a login after a newer interactive sign-in replaced that session.
+            String origin = portal.origin();
             // The host that answered an authenticated read is the one to try first next time.
             if (result.status == AdtPortalClient.Status.READY || result.status == AdtPortalClient.Status.BUSY)
-                AdtPortalSession.recordVerifiedOrigin(context, portal.origin());
-            // A signed-out answer is returned as it is; any automatic login runs afterwards with
-            // its own budget and tells the watch when the state is back. A keep-alive read never
-            // queues one: it keeps a live session alive, and a lapsed one waits for a read someone
-            // is waiting for, so an idle phone does not log in (and ADT does not send its login
-            // alert) while nobody is using the watch.
-            else if (!keepAliveRead()) AdtSessionRecovery.recoverLater(context, binding, result);
+                AdtPortalSession.recordVerifiedOrigin(context, origin);
+            // This client only reads an existing session. The caller's explicit query intent
+            // decides whether a failed read may queue credential recovery.
             return result;
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return null; }
         catch (Exception error) { return null; }

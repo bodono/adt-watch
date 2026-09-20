@@ -68,14 +68,26 @@ public final class AlarmTileService extends TileService {
 
     @Override protected ListenableFuture<Void> onRecentInteractionEventsAsync(
             List<EventBuilders.TileInteractionEvent> events) {
+        boolean entered = false;
+        EventBuilders.TileInteractionEvent latest = null;
         for (EventBuilders.TileInteractionEvent event : events) {
-            if (event.getEventType() == EventBuilders.TileInteractionEvent.ENTER) {
-                trace("enter batch");
-                // A delayed ENTER batch must not start another query after READY.
-                return WatchAlarmStore.refreshIfNeeded(this) ? awaitRefresh(() -> null) : immediate(null);
-            }
+            if (event.getEventType() == EventBuilders.TileInteractionEvent.ENTER) entered = true;
+            if (event.getEventType() != EventBuilders.TileInteractionEvent.ENTER
+                    && event.getEventType() != EventBuilders.TileInteractionEvent.LEAVE) continue;
+            if (latest == null || event.getTimestamp().compareTo(latest.getTimestamp()) > 0
+                    || event.getTimestamp().equals(latest.getTimestamp())
+                        && event.getEventType() == EventBuilders.TileInteractionEvent.LEAVE) latest = event;
         }
-        return immediate(null);
+        if (!entered) return immediate(null);
+        long now = System.currentTimeMillis(), timestamp = latest == null ? 0 : latest.getTimestamp().toEpochMilli();
+        // Modern renderers batch interactions. An old ENTER, future timestamp or subsequent
+        // LEAVE is background work, and must not make an idle phone submit a password.
+        boolean recentEntry = latest != null && latest.getEventType() == EventBuilders.TileInteractionEvent.ENTER
+            && timestamp > 0 && timestamp <= now && now - timestamp <= 10_000;
+        AlarmStateProtocol.QueryIntent intent = recentEntry ? AlarmStateProtocol.QueryIntent.USER : AlarmStateProtocol.QueryIntent.PASSIVE;
+        trace("enter batch intent=" + intent.name());
+        // A delayed ENTER batch must not start another query after READY.
+        return WatchAlarmStore.refreshIfNeeded(this, intent) ? awaitRefresh(() -> null) : immediate(null);
     }
 
     /** Older renderers use this callback; neither callback can authorize an alarm action. */
