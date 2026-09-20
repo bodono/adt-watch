@@ -202,7 +202,7 @@ public final class AdtPortalSetupActivity extends Activity {
         AdtPortalClient.Result chosen = candidate;
         boolean saved = AdtPortalSession.bind(this, chosen.systemId, chosen.partitionId);
         candidate = null;
-        if (saved) { CookieManager.getInstance().flush(); retireWebsite(); }
+        if (saved) { CookieManager.getInstance().flush(); retireWebsite(); AdtSessionRecovery.interactiveSignInCompleted(this); }
         status.setText(saved ? "ADT system selected. The sign-in page is closed; your sign-in is retained. "
             + "No alarm command was sent. Lock your phone and swipe to the watch tile to fetch ADT status."
             : "The ADT system could not be saved. Check live status and try again.");

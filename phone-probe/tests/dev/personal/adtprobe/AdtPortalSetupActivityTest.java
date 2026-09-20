@@ -115,6 +115,19 @@ public final class AdtPortalSetupActivityTest {
         assertTrue(AdtPortalSession.valid(context, AdtPortalSession.binding(context)));
     }
 
+    @Test public void choosingTheSystemResumesPausedAutomaticLogin() {
+        SharedPreferences recovery = context.getSharedPreferences(AdtSessionRecovery.PREFERENCES, Context.MODE_PRIVATE);
+        recovery.edit().putString("version", "11111111-1111-4111-8111-111111111111").putBoolean("enabled", true)
+            .putBoolean("blocked", true).putLong("attemptWall", System.currentTimeMillis()).putString("code", "SUBMIT/HTTP/401").commit();
+        try {
+            answer = ready(); begin(); finishQuery(); button("Use this ADT system").performClick();
+            assertNotNull(AdtPortalSession.binding(context));
+            assertFalse("The website sign-in is the attention the pause waited for", recovery.getBoolean("blocked", true));
+            assertFalse(recovery.contains("attemptWall"));
+            assertTrue("Only an explicit successful test can enable recovery", recovery.getBoolean("enabled", false));
+        } finally { recovery.edit().clear().commit(); }
+    }
+
     @Test public void choosingSystemRetiresWebsiteButNativeChecksKeepItsCookiesAndBinding() {
         WebView login = web();
         CookieManager cookies = CookieManager.getInstance();

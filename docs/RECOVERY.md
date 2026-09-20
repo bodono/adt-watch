@@ -211,7 +211,9 @@ still require physical verification.
    can re-login and read the same home inside the status-check deadline.
 4. If the saved password changes or ADT asks for verification, use **Open ADT
    sign-in** to finish the official flow, select the same home again, then
-   **Test saved login**. Failed or cancelled tests leave recovery disabled.
+   **Test saved login**. Choosing the system again also resumes paused
+   automatic attempts; the helper's main screen shows a pause and its check
+   code next to the sign-in notice. Failed or cancelled tests leave recovery disabled.
    **Forget saved login** removes its encrypted credentials and key.
 
 Credentials remain encrypted in private phone storage and are not included in

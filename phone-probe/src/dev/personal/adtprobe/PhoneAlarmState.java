@@ -273,12 +273,17 @@ final class PhoneAlarmState {
         switch (value.availability) {
             case READY: return "ADT live status: " + stateLabel(value.state) + ". Checked " + value.ageMillis / 1000 + " seconds ago.";
             case SETUP: return "Set up ADT live status to connect to your alarm's current reported state.";
-            case NO_ACCESS: return "ADT sign-in has expired or needs verification. Open Set up ADT live status.";
+            case NO_ACCESS: return "ADT sign-in has expired or needs verification. Open Set up ADT live status." + recoveryNote(context);
             case STALE: return "Swipe to the watch tile or refresh to query ADT again.";
             case BUSY: return "Querying ADT for the result of the request.";
             case OFFLINE: return "Could not read ADT. Refresh to try another status check.";
             default: return "No verified ADT status. Open Set up ADT live status and check the selected system.";
         }
+    }
+    /** A sign-in problem is where the owner needs to know whether automatic login will handle it. */
+    private static String recoveryNote(Context context) {
+        try { String note = AdtSessionRecovery.describe(context); return note == null ? "" : " " + note; }
+        catch (RuntimeException ignored) { return ""; }
     }
     static AlarmAction actionFor(AlarmStateProtocol.State state) { return AlarmStateProtocol.action(state); }
     private static String stateLabel(AlarmStateProtocol.State state) {

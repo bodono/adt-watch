@@ -207,6 +207,44 @@ public final class AdtSessionRecoveryTest {
         assertFalse(AdtSessionRecovery.test(app, deadline()).ready);
         assertFalse(app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("enabled", false));
     }
+    @Test public void thePhoneCanSayWhyAutomaticLoginIsNotHelping() {
+        version = ""; assertNull("Nothing saved, nothing to say", AdtSessionRecovery.describe(app));
+        version = UUID.randomUUID().toString();
+        assertTrue(AdtSessionRecovery.describe(app).contains("not verified"));
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready);
+        assertEquals("Automatic login is enabled.", AdtSessionRecovery.describe(app));
+        allowNextAttempt(); loginStatus = AdtLoginClient.Status.REJECTED;
+        recover(failure(AdtPortalClient.Status.LOGIN_REQUIRED));
+        String paused = AdtSessionRecovery.describe(app);
+        assertTrue(paused, paused.contains("paused after SUBMIT/NONE/200"));
+        website = AdtSessionRecovery.beginInteractiveSignIn();
+        assertTrue(AdtSessionRecovery.describe(app).contains("sign-in page is closed"));
+        AdtSessionRecovery.endInteractiveSignIn(website); website = 0;
+        AdtSessionRecovery.interactiveSignInCompleted(app);
+        assertEquals("Automatic login is enabled.", AdtSessionRecovery.describe(app));
+        loginStatus = AdtLoginClient.Status.UNAVAILABLE;
+        recover(failure(AdtPortalClient.Status.LOGIN_REQUIRED));
+        assertEquals("The website sign-in also cleared the retry delay", 3, logins);
+        String waiting = AdtSessionRecovery.describe(app);
+        assertTrue(waiting, waiting.contains("last ended with SUBMIT/NONE/200; it retries in about 5 minutes"));
+        assertFalse(app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("blocked", false));
+    }
+    @Test public void completingTheWebsiteSignInResumesPausedAttemptsWithoutReVerifying() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        loginStatus = AdtLoginClient.Status.REJECTED;
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        assertSame(original, recover(original)); assertEquals(2, logins);
+        allowNextAttempt(); assertSame(original, recover(original)); assertEquals("Paused", 2, logins);
+        AdtSessionRecovery.interactiveSignInCompleted(app);
+        loginStatus = AdtLoginClient.Status.SUBMITTED;
+        assertSame("Resumed without a retest and without waiting out the delay", response, recover(original));
+        assertEquals(3, logins);
+        assertTrue(app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getBoolean("enabled", false));
+        app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).edit().clear().commit();
+        AdtSessionRecovery.interactiveSignInCompleted(app);
+        allowNextAttempt(); assertSame("Never-verified credentials stay disabled", original, recover(original));
+        assertEquals(3, logins);
+    }
     @Test public void diagnosticsContainOnlyClosedCodesNotCredentialsOrHomeIdentifiers() {
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready);
         String values = app.getSharedPreferences(AdtSessionRecovery.PREFERENCES, 0).getAll().toString();

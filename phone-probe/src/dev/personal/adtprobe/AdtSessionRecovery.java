@@ -222,5 +222,43 @@ final class AdtSessionRecovery {
         finally { task.cancel(false); }
     }
 
+    /** What the phone should say about automatic login next to a sign-in problem; null when none is saved. */
+    static String describe(Context context) {
+        Context app = context.getApplicationContext();
+        String version = credentials.version(app);
+        if (version == null || version.isEmpty()) return null;
+        synchronized (COOKIE_LOCK) {
+            if (websiteOwner != 0) return "Automatic login waits until the ADT sign-in page is closed.";
+            SharedPreferences prefs = preferences(app);
+            if (!version.equals(prefs.getString("version", "")) || !prefs.getBoolean("enabled", false))
+                return "Automatic login is saved but not verified: open Automatic ADT login and run Test saved login.";
+            String code = prefs.getString("code", "");
+            if (prefs.getBoolean("blocked", false))
+                return "Automatic login is paused after " + code + ". Sign in through Set up ADT live status and choose"
+                    + " the system again, or run Test saved login.";
+            long last = prefs.getLong("attemptWall", 0), now = System.currentTimeMillis();
+            if (!"READY".equals(code) && now >= last && now - last < RETRY_DELAY_MS)
+                return "Automatic login last ended with " + code + "; it retries in about " + minutesLeft(now - last) + ".";
+            return "Automatic login is enabled.";
+        }
+    }
+    private static String minutesLeft(long since) {
+        long minutes = (RETRY_DELAY_MS - since + 59_999) / 60_000;
+        return minutes <= 1 ? "a minute" : minutes + " minutes";
+    }
+
+    /**
+     * The owner signed in on the website and chose the system again: the attention a pause was
+     * waiting for. Attempts resume and the retry delay is cleared; whether the saved credentials
+     * are verified (enabled) is unchanged, so an unverified login still needs its explicit test.
+     */
+    static void interactiveSignInCompleted(Context context) {
+        synchronized (COOKIE_LOCK) {
+            SharedPreferences prefs = preferences(context.getApplicationContext());
+            if (prefs.contains("version") && (prefs.getBoolean("blocked", false) || prefs.contains("attemptWall")))
+                prefs.edit().putBoolean("blocked", false).remove("attemptWall").commit();
+        }
+    }
+
     private static SharedPreferences preferences(Context app) { return app.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE); }
 }
