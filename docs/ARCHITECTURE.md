@@ -29,6 +29,9 @@ transitions. This removes the completed page's JavaScript from the background;
 it does not extend or guarantee the server's session lifetime.
 Each setup query has a cancellable session wrapper. After cancellation or
 completion, that attempt cannot read or overwrite the shared session cookies.
+A read that finds its session cancelled or replaced (a login in progress, a
+newer sign-in) reports the transient UNAVAILABLE, so a still-fresh observation
+keeps its display and the next read simply tries again.
 
 ### Optional automatic login
 

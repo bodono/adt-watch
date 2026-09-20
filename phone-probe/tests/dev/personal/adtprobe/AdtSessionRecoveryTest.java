@@ -168,7 +168,7 @@ public final class AdtSessionRecoveryTest {
         });
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready);
         try { old.storeCookie("old=value"); fail("Old response accepted"); }
-        catch (IllegalStateException expected) { }
+        catch (AdtPortalClient.SessionUnavailable expected) { /* A transient failure for the status client, not an unsupported response. */ }
     }
     @Test public void normalStatusSessionCreatedDuringLoginCannotWriteCookies() {
         AdtSessionRecovery.loginOperation = (session, username, password, deadline) -> {
@@ -180,7 +180,9 @@ public final class AdtSessionRecoveryTest {
             });
             session.storeCookie("new=value");
             try { competing.storeCookie("old=value"); fail("Concurrent cookie write accepted"); }
-            catch (IllegalStateException expected) { }
+            catch (AdtPortalClient.SessionUnavailable expected) { }
+            try { competing.cookies(); fail("Concurrent read accepted"); }
+            catch (AdtPortalClient.SessionUnavailable expected) { }
             return loginAnswer();
         };
         assertTrue(AdtSessionRecovery.test(app, deadline()).ready); assertEquals(1, cookieWrites);

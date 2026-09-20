@@ -166,6 +166,17 @@ public final class AdtLoginClientTest {
         assertEquals("The coordinator must reject an unauthenticated scoped GET", AdtLoginClient.Status.SUBMITTED, login().status);
         assertEquals(1, posts());
     }
+    @Test public void aSessionReplacedDuringLoginIsTransientNotUnsupported() {
+        AdtLoginClient replaced = new AdtLoginClient(new AdtPortalClient.Session() {
+            @Override public String cookies() { throw new AdtPortalClient.SessionUnavailable("replaced"); }
+            @Override public String userAgent() { return "inert-browser-agent"; }
+            @Override public void storeCookie(String cookie) { }
+        }, transport, clock);
+        AdtLoginClient.Result result = replaced.login("inert-user", SECRET.toCharArray(), clock.now + 10_000);
+        assertEquals(AdtLoginClient.Status.UNAVAILABLE, result.status);
+        assertEquals("FORM/SESSION", result.diagnosticCode());
+        assertEquals(0, transport.requests.size());
+    }
     @Test public void arbitrary200PostHtmlCannotValidateNewCredentialsUsingAnExistingSession() {
         session.cookies = "twoFactorAuthenticationId=inert-trust; afg=old-valid-session";
         transport.responses.add(html(form(), null));

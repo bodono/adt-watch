@@ -63,7 +63,7 @@ final class AdtSessionRecovery {
         synchronized (COOKIE_LOCK) { captured = epoch; }
         return new AdtPortalClient.Session() {
             private void check() {
-                if (epoch != captured || LOGIN_LOCK.isLocked()) throw new IllegalStateException("Session replaced");
+                if (epoch != captured || LOGIN_LOCK.isLocked()) throw new AdtPortalClient.SessionUnavailable("Session replaced");
             }
             @Override public String origin() { synchronized (COOKIE_LOCK) { check(); return delegate.origin(); } }
             @Override public String cookies() { synchronized (COOKIE_LOCK) { check(); return delegate.cookies(); } }
@@ -154,7 +154,7 @@ final class AdtSessionRecovery {
                 AdtPortalClient.Session guarded = new AdtPortalClient.Session() {
                     private void check() {
                         if (!valid(app, binding, version, startedEpoch, startedTest, manual, deadline))
-                            throw new IllegalStateException("Login cancelled");
+                            throw new AdtPortalClient.SessionUnavailable("Login cancelled");
                     }
                     @Override public String origin() { synchronized (COOKIE_LOCK) { check(); return delegate.origin(); } }
                     @Override public String cookies() { synchronized (COOKIE_LOCK) { check(); return delegate.cookies(); } }

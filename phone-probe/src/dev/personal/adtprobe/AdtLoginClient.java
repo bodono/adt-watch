@@ -153,7 +153,8 @@ final class AdtLoginClient {
                 : failure instanceof SocketTimeoutException ? Reason.TIMEOUT : failure instanceof UnknownHostException ? Reason.DNS
                 : failure instanceof SSLException ? Reason.TLS : Reason.IO;
             return result(Status.UNAVAILABLE, started, stage, reason, http);
-        } catch (RuntimeException ignored) { return result(Status.UNSUPPORTED, started, stage, Reason.FORM, http); }
+        } catch (AdtPortalClient.SessionUnavailable ignored) { return result(Status.UNAVAILABLE, started, stage, Reason.SESSION, http); }
+        catch (RuntimeException ignored) { return result(Status.UNSUPPORTED, started, stage, Reason.FORM, http); }
         finally {
             if (encoded != null) Arrays.fill(encoded, (byte) 0);
             if (session != null) try { session.persist(); } catch (RuntimeException ignored) { }
