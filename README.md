@@ -61,10 +61,10 @@ refresh. Steady-state reads within three seconds share one result. After a reque
 phone re-checks ADT about once a second for up to 30 seconds, sharing only
 results less than a second old while the request or ADT remains busy. An ADT
 notification prompts an immediate fresh read; it never supplies the alarm state.
-While the phone's ADT session is alive it repeats a status read ten minutes
-after the last one, so the website session, which ADT closes after fifteen idle
-minutes, does not lapse and log in again on every watch use; that read never
-starts a login itself.
+After a successful status read, the phone schedules another ten minutes later
+as a best-effort attempt to reduce idle session expiry. Whether these API reads
+extend ADT's server session still needs an idle-session test. The timer's read
+never starts a login itself, and it stops after a failed read.
 Status observations expire after at most 60 seconds. Their age means
 time since the query, not time since the alarm last changed. This is a backend
 status query, not a forced physical-panel poll. Wear OS controls Tile scheduling,

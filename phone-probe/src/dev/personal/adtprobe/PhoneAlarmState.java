@@ -29,7 +29,7 @@ final class PhoneAlarmState {
     static final long CONFIRMATION_REUSE_MS = 1_000;
     /** Interval between confirmation reads after a command; each is an authenticated portal read. */
     static final long CONFIRMATION_POLL_MS = 1_000;
-    /** Alarm.com logs a website session out after fifteen idle minutes; a read this often keeps it alive. */
+    /** Best-effort idle status read; server session renewal still needs real-device verification. */
     static final long KEEP_ALIVE_MS = 10 * 60_000;
     private static final long QUERY_MS = 8_000;
     private static final ReentrantLock QUERY_LOCK = new ReentrantLock();

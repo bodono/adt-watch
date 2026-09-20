@@ -251,12 +251,13 @@ including account details.
   than a failed password. The discovery limit is 4 MiB. A timeout or
   server error can be retried with **Check live status**; signing in again is
   needed when the screen specifically requests sign-in or verification.
-- **Repeated "Successful Login" alerts from ADT:** ADT sends one for each new
-  website session. The phone keeps a live session alive with a status read
-  every ten minutes, so ordinary use does not log in again; after the phone has
-  slept deeply the session can still lapse, and the first watch use afterwards
-  logs in once. Turning the alert off under the account's system-event
-  notifications hides genuine logins too.
+- **Repeated "Successful Login" alerts from ADT:** automatic recovery creates
+  a new website session and can generate a login alert. The phone attempts a
+  status read after ten idle minutes to reduce expiry, but whether this renews
+  the server session still needs verification. Its timer never starts a login;
+  process death, deep sleep or a failed read can interrupt the checks. A later
+  watch request may therefore still need automatic login. Turning the alert
+  off under the account's system-event notifications hides genuine logins too.
 - **More than one system/partition or an unsupported response:** this version
   cannot select an arbitrary member of a multi-system account or guess an
   unfamiliar state. A compatibility change is needed; keep using ADT directly.
