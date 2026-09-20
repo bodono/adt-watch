@@ -156,6 +156,13 @@ request is never reinterpreted as the opposite action. Otherwise the phone
 prepares the selected widget and uses the matched challenge/commit exchange to
 attempt it once. This exchange requires no second user confirmation.
 
+The phone reuses an already verified idle widget render without requesting a
+layout refresh. An initially unready widget gets one size-options request and
+must deliver a later verified render before readiness can pass. This avoids an
+unnecessary ADT repaint racing with the watch's reply. Any render change after
+the challenge still rejects the request before a click; independent provider
+updates can therefore still cause a rejection. No challenge or command is retried.
+
 After final widget validation and immediately before its listener is invoked,
 the phone durably records the request as pending. A listener returning false or
 throwing may still have attempted a handoff, so that remains uncertain. Only a

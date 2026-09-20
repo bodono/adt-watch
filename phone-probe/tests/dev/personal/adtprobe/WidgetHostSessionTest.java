@@ -13,6 +13,7 @@ import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
+import android.os.Bundle;
 import android.os.Looper;
 import android.os.Process;
 import android.view.View;
@@ -24,6 +25,7 @@ import android.widget.TextView;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Collections;
+import java.util.function.Consumer;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -37,6 +39,7 @@ import org.robolectric.annotation.Implements;
 import org.robolectric.annotation.LooperMode;
 import org.robolectric.annotation.RealObject;
 import org.robolectric.shadows.ShadowAppWidgetHost;
+import org.robolectric.shadows.ShadowAppWidgetManager;
 import org.robolectric.util.ReflectionHelpers;
 import static org.junit.Assert.*;
 
@@ -45,7 +48,7 @@ import static org.junit.Assert.*;
  * This demonstrates our host/latch behavior, not system-server delivery or ADT locked-phone behavior.
  */
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 35, shadows = WidgetHostSessionTest.HostShadow.class)
+@Config(sdk = 35, shadows = {WidgetHostSessionTest.HostShadow.class, WidgetHostSessionTest.ManagerShadow.class})
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class WidgetHostSessionTest {
     private static final String ACTION = "dev.personal.adtprobe.INERT_HOST_SESSION_TEST";
@@ -59,6 +62,7 @@ public final class WidgetHostSessionTest {
     private WidgetHostSession.Contract contract;
 
     @Before public void prepare() throws Exception {
+        resetShadowCallbacks();
         context = RuntimeEnvironment.getApplication();
         valid = true;
         contract = new WidgetHostSession.Contract(context.getPackageName(), android.R.layout.simple_list_item_1,
@@ -71,6 +75,11 @@ public final class WidgetHostSessionTest {
     }
 
     private void startSession(AlarmAction action, String label) throws Exception {
+        openSession(action);
+        render(android.R.layout.simple_list_item_1, label);
+    }
+
+    private void openSession(AlarmAction action) throws Exception {
         if (session != null) session.close();
         int widgetId = action == AlarmAction.ARM_STAY ? 7 : 8;
         AppWidgetProviderInfo info = new AppWidgetProviderInfo();
@@ -85,12 +94,118 @@ public final class WidgetHostSessionTest {
         session.start();
         view = (AppWidgetHostView) field("view");
         assertNotNull(session.status(), view);
-        render(android.R.layout.simple_list_item_1, label);
     }
 
     @After public void close() {
         if (session != null) session.close();
         if (receiver != null) context.unregisterReceiver(receiver);
+        resetShadowCallbacks();
+    }
+
+    private static void resetShadowCallbacks() {
+        HostShadow.initialRender = null;
+        HostShadow.lastCreatedView = null;
+        ManagerShadow.optionsRequests = 0;
+        ManagerShadow.lastOptions = null;
+        ManagerShadow.onOptionsUpdated = null;
+    }
+
+    @Test public void verifiedCachedIdleRenderStartsWithoutRequestingAnotherProviderRender() throws Exception {
+        ManagerShadow.optionsRequests = 0;
+        for (AlarmAction action : new AlarmAction[] {AlarmAction.ARM_STAY, AlarmAction.DISARM}) {
+            HostShadow.initialRender = created ->
+                render(context, created, android.R.layout.simple_list_item_1, action.widgetLabel());
+            openSession(action);
+            assertTrue(session.diagnostics(), session.isReady());
+            assertTrue(session.renderGeneration() > 0);
+            assertTrue(Shadows.shadowOf((AppWidgetHost) field("host")).isListening());
+            assertEquals("An already verified native render needs no options refresh", 0,
+                ManagerShadow.optionsRequests);
+            session.start();
+            session.close();
+            session.start();
+            assertEquals("Repeated and closed starts must not request a provider refresh", 0,
+                ManagerShadow.optionsRequests);
+        }
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("Readiness alone never clicks the inert action", 0, received);
+    }
+
+    @Test public void compactCachedRenderRequestsWideOptionsOnceAndWaitsForANewRender() throws Exception {
+        ManagerShadow.optionsRequests = 0;
+        HostShadow.initialRender = created ->
+            render(context, created, android.R.layout.simple_list_item_2, AlarmAction.ARM_STAY.widgetLabel());
+        openSession(AlarmAction.ARM_STAY);
+        assertEquals(1, ManagerShadow.optionsRequests);
+        assertEquals(240, ManagerShadow.lastOptions.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH));
+        assertEquals(320, ManagerShadow.lastOptions.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH));
+        assertEquals(100, ManagerShadow.lastOptions.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT));
+        assertEquals(150, ManagerShadow.lastOptions.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT));
+        assertFalse(session.isReady());
+        assertFalse(session.activateOnce(session.renderGeneration()));
+        session.start();
+        assertEquals(1, ManagerShadow.optionsRequests);
+        render(android.R.layout.simple_list_item_1, AlarmAction.ARM_STAY.widgetLabel());
+        assertTrue(session.diagnostics(), session.isReady());
+        session.close();
+        session.start();
+        assertEquals("A closed session cannot request the provider again", 1, ManagerShadow.optionsRequests);
+        assertFalse(session.activateOnce(session.renderGeneration()));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(0, received);
+    }
+
+    @Test public void missingCachedRenderRequestsWideOptionsOnlyOnce() throws Exception {
+        ManagerShadow.optionsRequests = 0;
+        openSession(AlarmAction.DISARM);
+        assertEquals(1, ManagerShadow.optionsRequests);
+        assertFalse(session.isReady());
+        session.start();
+        assertFalse(session.isReady());
+        session.close();
+        session.start();
+        assertEquals(1, ManagerShadow.optionsRequests);
+        assertFalse(session.activateOnce(session.renderGeneration()));
+        assertEquals(0, received);
+    }
+
+    @Test public void requestingOptionsDiscardsAnUnreadyCachedRenderUntilAnActualUpdate() throws Exception {
+        ManagerShadow.optionsRequests = 0;
+        HostShadow.initialRender = created -> {
+            render(context, created, android.R.layout.simple_list_item_1, AlarmAction.ARM_STAY.widgetLabel());
+            ((ProgressBar) created.findViewById(RING)).setProgress(1);
+        };
+        openSession(AlarmAction.ARM_STAY);
+        assertEquals(1, ManagerShadow.optionsRequests);
+        assertFalse(session.isReady());
+        ((ProgressBar) view.findViewById(RING)).setProgress(0);
+        assertFalse("Options invalidate the cached snapshot until a provider update is observed", session.isReady());
+        assertFalse(session.activateOnce(session.renderGeneration()));
+        render(android.R.layout.simple_list_item_1, AlarmAction.ARM_STAY.widgetLabel());
+        assertTrue(session.diagnostics(), session.isReady());
+        assertEquals(1, ManagerShadow.optionsRequests);
+        assertEquals(0, received);
+    }
+
+    @Test public void synchronousProviderRenderDuringOptionsRequestCanBecomeReady() throws Exception {
+        ManagerShadow.optionsRequests = 0;
+        HostShadow.initialRender = created ->
+            render(context, created, android.R.layout.simple_list_item_2, AlarmAction.DISARM.widgetLabel());
+        ManagerShadow.onOptionsUpdated = () ->
+            render(context, HostShadow.lastCreatedView, android.R.layout.simple_list_item_1,
+                AlarmAction.DISARM.widgetLabel());
+        openSession(AlarmAction.DISARM);
+        assertEquals(1, ManagerShadow.optionsRequests);
+        assertTrue("Invalidate before asking for options, so its synchronous update remains eligible: "
+            + session.diagnostics(), session.isReady());
+        long current = session.renderGeneration();
+        render(android.R.layout.simple_list_item_1, AlarmAction.DISARM.widgetLabel());
+        assertFalse("An actual later re-render still invalidates the previous generation",
+            session.activateOnce(current));
+        assertTrue(session.activateOnce(session.renderGeneration()));
+        assertFalse(session.activateOnce(session.renderGeneration()));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, received);
     }
 
     @Test public void detachedNativeRemoteViewsClickSendsOneInertBroadcastOnly() throws Exception {
@@ -351,6 +466,10 @@ public final class WidgetHostSessionTest {
     }
 
     private void render(int layout, String label) {
+        render(context, view, layout, label);
+    }
+
+    private static void render(Context context, AppWidgetHostView view, int layout, String label) {
         PendingIntent inert = PendingIntent.getBroadcast(context, 902,
             new Intent(ACTION).setPackage(context.getPackageName()),
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
@@ -378,12 +497,19 @@ public final class WidgetHostSessionTest {
     /** Robolectric's stock host shadow replaces onCreateView; preserve that public subclass hook. */
     @Implements(AppWidgetHost.class)
     public static final class HostShadow extends ShadowAppWidgetHost {
+        static Consumer<AppWidgetHostView> initialRender;
+        static AppWidgetHostView lastCreatedView;
         @RealObject private AppWidgetHost realHost;
         @Implementation protected AppWidgetHostView createView(Context context, int id, AppWidgetProviderInfo info) {
-            return ReflectionHelpers.callInstanceMethod(realHost, "onCreateView",
+            AppWidgetHostView created = ReflectionHelpers.callInstanceMethod(realHost, "onCreateView",
                 ReflectionHelpers.ClassParameter.from(Context.class, context),
                 ReflectionHelpers.ClassParameter.from(int.class, id),
                 ReflectionHelpers.ClassParameter.from(AppWidgetProviderInfo.class, info));
+            lastCreatedView = created;
+            Consumer<AppWidgetHostView> cached = initialRender;
+            initialRender = null;
+            if (cached != null) cached.accept(created);
+            return created;
         }
         @Implementation protected int[] getAppWidgetIds() {
             return new int[] {getHostId() == AlarmWidgetSlot.hostId(AlarmAction.ARM_STAY) ? 7 : 8};
@@ -391,5 +517,19 @@ public final class WidgetHostSessionTest {
         @Override @Implementation protected int allocateAppWidgetId() { throw new AssertionError("Must not allocate"); }
         @Implementation protected void deleteAppWidgetId(int id) { throw new AssertionError("Must not delete"); }
         @Implementation protected void deleteHost() { throw new AssertionError("Must not delete host"); }
+    }
+
+    /** Counts ordinary options requests; optional callbacks render inert test views only. */
+    @Implements(AppWidgetManager.class)
+    public static final class ManagerShadow extends ShadowAppWidgetManager {
+        static int optionsRequests;
+        static Bundle lastOptions;
+        static Runnable onOptionsUpdated;
+        @Override @Implementation protected void updateAppWidgetOptions(int id, Bundle options) {
+            optionsRequests++;
+            lastOptions = new Bundle(options);
+            super.updateAppWidgetOptions(id, options);
+            if (onOptionsUpdated != null) onOptionsUpdated.run();
+        }
     }
 }

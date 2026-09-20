@@ -448,8 +448,16 @@ public final class ArmExperimentService extends Service {
                         + ", fullyLocked=" + locked + ", authorized=" + authorised + ".");
                     lastReady = readySnapshot; lastLocked = locked;
                 }
-                if (challengeIssued && (!locked || !readySnapshot || host.renderGeneration() != challengeGeneration)) {
-                    rejectChallenge("Arm experiment rejected: widget changed after the challenge.");
+                if (challengeIssued && !locked) {
+                    rejectChallenge("Arm experiment rejected: phone no longer fully locked after the challenge.");
+                    return;
+                }
+                if (challengeIssued && !readySnapshot) {
+                    rejectChallenge("Arm experiment rejected: widget no longer verified idle after the challenge.");
+                    return;
+                }
+                if (challengeIssued && host.renderGeneration() != challengeGeneration) {
+                    rejectChallenge("Arm experiment rejected: widget render changed after the challenge.");
                     return;
                 }
                 if (challengeIssued && SystemClock.elapsedRealtime() >= challengeUntil) {

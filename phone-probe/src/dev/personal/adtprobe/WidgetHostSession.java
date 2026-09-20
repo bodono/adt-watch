@@ -103,14 +103,26 @@ final class WidgetHostSession implements AutoCloseable {
             }
             host.startListening();
             listening = true;
-            Bundle options = new Bundle();
-            options.putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 240);
-            options.putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 320);
-            options.putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 100);
-            options.putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 150);
-            // ADT initially configures a compact widget. This asks its normal provider for wide UI.
-            AppWidgetManager.getInstance(context).updateAppWidgetOptions(snapshot.id, options);
             measure(view);
+            if (isReady()) {
+                // The cached render already satisfies the complete reviewed idle contract. Sending
+                // redundant size options asks ADT to repaint asynchronously and can invalidate a
+                // challenge while the watch is replying. Reuse this render with the usual guards.
+                Probe.event(context, "Arm experiment widget startup: reused verified idle render.");
+            } else if (!broken) {
+                Bundle options = new Bundle();
+                options.putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 240);
+                options.putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 320);
+                options.putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 100);
+                options.putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 150);
+                // ADT initially configures a compact widget. Only that unready path needs a
+                // layout request. Drop the old render first, including for synchronous updates;
+                // readiness must come from a later applied render, never the pre-request cache.
+                invalidate("Widget layout refresh requested; waiting for a new idle render.", false);
+                Probe.event(context, "Arm experiment widget startup: requested one layout refresh.");
+                AppWidgetManager.getInstance(context).updateAppWidgetOptions(snapshot.id, options);
+                measure(view);
+            }
             isReady();
         } catch (Exception ignored) {
             invalidate("Widget hosting failed; activation is blocked.", true);

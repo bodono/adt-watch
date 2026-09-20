@@ -5,8 +5,8 @@ final class ArmReadinessWait {
     static final long MAX_WAIT_MS = 5_000;
     /**
      * How long the reviewed widget must stay idle, and unchanged, before a challenge is issued. It
-     * lets the provider's re-render after updateAppWidgetOptions land first; commit() still rejects
-     * any render after the challenge, so this trades a little latency for fewer spurious rejections.
+     * lets startup updates settle before the challenge. Already idle widgets need no size refresh;
+     * commit() still rejects any render after the challenge, including visually identical updates.
      */
     static final long STABLE_READY_MS = 500;
     private boolean offered;
