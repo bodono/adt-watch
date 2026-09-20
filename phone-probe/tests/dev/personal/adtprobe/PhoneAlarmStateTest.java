@@ -28,6 +28,8 @@ public final class PhoneAlarmStateTest {
     private Context context;
     private PhoneAlarmState.Query oldQuery;
     private PhoneAlarmState.Schedule oldSchedule;
+    private PhoneAlarmState.Publish oldPublish;
+    private int published;
     private AdtPortalClient.Result answer;
     private int queries;
     private final List<ScheduledRead> scheduled = new ArrayList<>();
@@ -39,12 +41,14 @@ public final class PhoneAlarmStateTest {
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "storageFailed", false);
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
         oldQuery = PhoneAlarmState.queryOperation; oldSchedule = PhoneAlarmState.scheduleOperation;
+        oldPublish = PhoneAlarmState.publishOperation; PhoneAlarmState.publishOperation = app -> published++;
         PhoneAlarmState.scheduleOperation = (action, delay) -> { };
         PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; return answer; };
         answer = result(AlarmStateProtocol.State.DISARMED);
     }
     @After public void finish() {
         PhoneAlarmState.queryOperation = oldQuery; PhoneAlarmState.scheduleOperation = oldSchedule;
+        PhoneAlarmState.publishOperation = oldPublish;
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "hintRead", null);
     }
     @Test public void legacyManualOrNotificationCacheCannotSupplyState() {
@@ -287,14 +291,29 @@ public final class PhoneAlarmStateTest {
         assertEquals(1, scheduled.size()); runNext(0);
         assertTrue(held[0]); assertFalse(lock.isLocked());
         assertEquals("A failed recovery reads nothing", 0, queries);
+        assertEquals("...and tells the watch nothing", 0, published);
         assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        boolean[] heldDuringRead = {false};
+        PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; heldDuringRead[0] = lock.isHeldByCurrentThread(); return answer; };
         PhoneAlarmState.scheduleRecovery(context, () -> true);
         runNext(0);
         assertEquals("A successful recovery is followed by one fresh read", 1, queries);
+        assertTrue("...made while the task still holds the lock", heldDuringRead[0]);
         assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("...and the watch is told", 1, published);
         PhoneAlarmState.scheduleRecovery(context, () -> { throw new IllegalStateException("inert"); });
         runNext(0);
         assertEquals("A throwing task neither reads nor leaks the lock", 1, queries); assertFalse(lock.isLocked());
+        assertEquals(1, published);
+    }
+    @Test public void aRecoveredSessionIsAnnouncedEvenWhenTheFollowUpReadFails() {
+        bind(); captureSchedule();
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        PhoneAlarmState.scheduleRecovery(context, () -> true);
+        runNext(0);
+        assertEquals(1, queries);
+        assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(context).availability);
+        assertEquals("The sign-in answer stopped the watch's polling; this hint restarts it", 1, published);
     }
     @Test public void aPollPublishesOnlyWhenSomethingChanged() {
         bind(); PhoneAlarmState.Snapshot first = read();

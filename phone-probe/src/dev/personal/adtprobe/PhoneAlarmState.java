@@ -38,6 +38,9 @@ final class PhoneAlarmState {
     private static final class HintRead { boolean running, again; }
     interface Schedule { void after(Runnable action, long delayMillis); }
     static Schedule scheduleOperation = (action, delay) -> READS.schedule(action, delay, TimeUnit.MILLISECONDS);
+    /** Where the phone sends the watch state it did not ask for; inert tests replace it. */
+    interface Publish { void publish(Context context); }
+    static Publish publishOperation = PhoneStateLink::publish;
     private static boolean storageFailed;
     interface Query { AdtPortalClient.Result query(Context context, long deadline); }
     static Query queryOperation = PhoneAlarmState::queryPortal;
@@ -207,7 +210,7 @@ final class PhoneAlarmState {
             // own query is reused. The watch polls on its own, so a hint goes out only on change.
             Snapshot before = snapshot(app);
             Snapshot value = refresh(app, REUSE_MS, requestStarted);
-            if (changed(before, value)) PhoneStateLink.publish(app);
+            if (changed(before, value)) publishOperation.publish(app);
             if (value.pending && SystemClock.elapsedRealtime() < deadline) scheduleResultRead(app, request, deadline);
         }, CONFIRMATION_POLL_MS);
     }
@@ -249,7 +252,7 @@ final class PhoneAlarmState {
                     expected.again = false;
                 }
                 // A notification means the state probably just changed, so this read is not reused.
-                try { refresh(app, 0); PhoneStateLink.publish(app); }
+                try { refresh(app, 0); publishOperation.publish(app); }
                 finally {
                     boolean followUp;
                     synchronized (HINT_LOCK) {
@@ -267,9 +270,12 @@ final class PhoneAlarmState {
 
     /**
      * Runs a session-recovery task on the reads worker under the query lock, so status reads wait
-     * for it instead of colliding with its login. When it succeeds, one ordinary read stores the
-     * recovered state and the watch gets a status hint; the read that noticed the expired session
-     * has long since returned its failure.
+     * for it instead of colliding with its login. When it succeeds, one ordinary read, made while
+     * the lock is still held, stores the recovered state, and the watch gets a status hint whether
+     * or not that read succeeded: the failure that started all this reached the watch as
+     * NO_ACCESS, which stops its polling, and any hint restarts one bounded query whose reply is
+     * read with the recovered session. The read that noticed the expired session has long since
+     * returned its failure.
      */
     static void scheduleRecovery(Context context, BooleanSupplier recovery) {
         Context app = context.getApplicationContext();
@@ -277,13 +283,16 @@ final class PhoneAlarmState {
             boolean locked = false, recovered = false;
             try {
                 locked = QUERY_LOCK.tryLock(QUERY_MS, TimeUnit.MILLISECONDS);
-                if (locked) recovered = recovery.getAsBoolean();
+                if (locked) {
+                    recovered = recovery.getAsBoolean();
+                    // The lock is reentrant, so this read cannot lose a lock wait to another reader.
+                    if (recovered) refresh(app, 0);
+                }
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
             catch (RuntimeException ignored) { /* Recovery keeps its own closed diagnostics. */ }
             finally { if (locked) QUERY_LOCK.unlock(); }
             diagnostic("RECOVERY " + (recovered ? "READY" : "NONE"));
-            if (!recovered) return;
-            if (refresh(app, 0).verified) PhoneStateLink.publish(app);
+            if (recovered) publishOperation.publish(app);
         }, 0);
     }
 

@@ -47,9 +47,11 @@ logs in and reads the already selected system/partition. On a status
 authentication failure the read returns that failure at once and queues one
 login attempt on the reads worker with its own 20-second budget, run under the
 query lock so status reads wait for it instead of colliding with it. After a
-verified matching-home read commits the new cookies, one ordinary status read
-stores the state and the watch receives a status hint. It never sends or
-replays an alarm action. An attempt is recorded before
+verified matching-home read commits the new cookies, one ordinary status read,
+made while the lock is still held, stores the state, and the watch receives a
+status hint whether or not that read succeeded: the sign-in answer had stopped
+its polling, and any hint restarts one bounded query whose reply is read with
+the recovered session. It never sends or replays an alarm action. An attempt is recorded before
 submission; transient failures have a five-minute retry delay, while rejected
 credentials, renewed verification and any failure after credentials were sent
 pause attempts until an explicit successful test. A login page the parser

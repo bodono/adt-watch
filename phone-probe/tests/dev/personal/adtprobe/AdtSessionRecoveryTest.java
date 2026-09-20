@@ -37,6 +37,8 @@ public final class AdtSessionRecoveryTest {
     private long website, loginStarted, loginDeadline;
     private PhoneAlarmState.Schedule oldSchedule;
     private PhoneAlarmState.Query oldQuery;
+    private PhoneAlarmState.Publish oldPublish;
+    private int published;
     private final List<Runnable> scheduled = new ArrayList<>();
     private int phoneReads;
 
@@ -51,6 +53,7 @@ public final class AdtSessionRecoveryTest {
         Settings.Global.putInt(app.getContentResolver(), Settings.Global.BOOT_COUNT, 3);
         ReflectionHelpers.setStaticField(PhoneAlarmState.class, "storageFailed", false);
         oldSchedule = PhoneAlarmState.scheduleOperation; oldQuery = PhoneAlarmState.queryOperation;
+        oldPublish = PhoneAlarmState.publishOperation; PhoneAlarmState.publishOperation = context -> published++;
         PhoneAlarmState.scheduleOperation = (action, delay) -> scheduled.add(action);
         PhoneAlarmState.queryOperation = (context, deadline) -> { phoneReads++; return response; };
         oldSessions = AdtSessionRecovery.sessions; oldLogin = AdtSessionRecovery.loginOperation;
@@ -77,6 +80,7 @@ public final class AdtSessionRecoveryTest {
     }
     @After public void restore() {
         PhoneAlarmState.scheduleOperation = oldSchedule; PhoneAlarmState.queryOperation = oldQuery;
+        PhoneAlarmState.publishOperation = oldPublish;
         AdtSessionRecovery.endInteractiveSignIn(website);
         AdtSessionRecovery.sessions = oldSessions; AdtSessionRecovery.loginOperation = oldLogin;
         AdtSessionRecovery.readOperation = oldRead; AdtSessionRecovery.credentials = oldCredentials;
@@ -185,6 +189,7 @@ public final class AdtSessionRecoveryTest {
             loginDeadline - loginStarted >= AdtSessionRecovery.BACKGROUND_BUDGET_MS);
         assertEquals("One ordinary read stored the recovered state", 1, phoneReads);
         assertEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(app).availability);
+        assertEquals("...and the watch was told", 1, published);
         assertFalse(queryLock.isLocked());
         assertTrue("The next expiry can queue again", scheduled.isEmpty());
     }
@@ -193,8 +198,18 @@ public final class AdtSessionRecoveryTest {
         loginStatus = AdtLoginClient.Status.UNAVAILABLE;
         AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
         assertSame(original, recover(original));
-        assertEquals(2, logins); assertEquals(0, phoneReads);
+        assertEquals(2, logins); assertEquals(0, phoneReads); assertEquals(0, published);
         assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(app).availability);
+    }
+    @Test public void aSuccessfulRecoveryTellsTheWatchEvenIfItsFollowUpReadFails() {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready); allowNextAttempt();
+        PhoneAlarmState.queryOperation = (context, deadline) -> { phoneReads++; return failure(AdtPortalClient.Status.UNAVAILABLE); };
+        AdtPortalClient.Result original = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        assertTrue(AdtSessionRecovery.recoverLater(app, AdtPortalSession.binding(app), original));
+        scheduled.remove(0).run();
+        assertEquals(2, logins); assertEquals(1, phoneReads);
+        assertNotEquals(AlarmStateProtocol.Availability.READY, PhoneAlarmState.snapshot(app).availability);
+        assertEquals("The watch is told to query again; that reply is read with the recovered session", 1, published);
     }
     @Test public void nothingIsQueuedForNetworkFailuresOrWhilePausedCoolingDownOrSigningIn() {
         AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
