@@ -3,10 +3,15 @@ package dev.personal.adtprobe;
 import android.content.Context;
 import android.os.SystemClock;
 import android.provider.Settings;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.After;
 import org.junit.Before;
@@ -202,6 +207,94 @@ public final class PhoneAlarmStateTest {
         PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; advance(8_001); return answer; };
         assertFalse("Nor does one that outran its deadline", read().verified);
         assertEquals(3, queries);
+    }
+    @Test public void refreshFailureBelongsToTheCurrentReadAndNeverLeaksFromCachedStatus() {
+        assertEquals(AlarmStateProtocol.DeclineReason.SETUP_REQUIRED, PhoneAlarmState.refresh(context).refreshFailure);
+        assertNull(PhoneAlarmState.snapshot(context).refreshFailure);
+        bind(); read();
+        for (AdtPortalClient.Status status : new AdtPortalClient.Status[] {
+                AdtPortalClient.Status.LOGIN_REQUIRED, AdtPortalClient.Status.VERIFY_LOGIN }) {
+            answer = failure(status);
+            assertEquals(AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED, read().refreshFailure);
+            assertNull("A passive snapshot must not attribute an earlier read's failure to a new call",
+                PhoneAlarmState.snapshot(context).refreshFailure);
+        }
+        answer = failure(AdtPortalClient.Status.UNAVAILABLE);
+        PhoneAlarmState.Snapshot transientFailure = read();
+        assertEquals("A fresh cached state still exists", AlarmStateProtocol.Availability.READY, transientFailure.availability);
+        assertFalse(transientFailure.verified); assertTrue(transientFailure.readFailed);
+        assertEquals("The new network failure replaces the old authentication diagnosis",
+            AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED, transientFailure.refreshFailure);
+        for (AdtPortalClient.Status status : new AdtPortalClient.Status[] {
+                AdtPortalClient.Status.UNSUPPORTED, AdtPortalClient.Status.AMBIGUOUS }) {
+            answer = failure(status);
+            assertEquals(AlarmStateProtocol.DeclineReason.STATUS_UNAVAILABLE, read().refreshFailure);
+        }
+        answer = result(AlarmStateProtocol.State.DISARMED);
+        assertNull(read().refreshFailure);
+        assertNull(PhoneAlarmState.refresh(context).refreshFailure);
+        assertEquals("Diagnostics never queue recovery for passive reads", 0, recoveries);
+    }
+    @Test public void timedOutAuthenticationReplyDoesNotClaimAnAcceptedSignInDiagnosis() {
+        bind(); answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED);
+        PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; advance(8_001); return answer; };
+        PhoneAlarmState.Snapshot timeout = PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+        assertFalse(timeout.verified);
+        assertEquals(AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED, timeout.refreshFailure);
+        assertEquals(0, recoveries); assertEquals(1, queries);
+    }
+    @Test public void lockWaitTimeoutDoesNotReuseACachedAuthenticationFailureAsItsCause() throws Exception {
+        bind(); answer = failure(AdtPortalClient.Status.LOGIN_REQUIRED); read();
+        assertEquals(AlarmStateProtocol.Availability.NO_ACCESS, PhoneAlarmState.snapshot(context).availability);
+        ReentrantLock queryLock = ReflectionHelpers.getStaticField(PhoneAlarmState.class, "QUERY_LOCK");
+        CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            queryLock.lock();
+            try { held.countDown(); release.await(); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { queryLock.unlock(); }
+        });
+        holder.setDaemon(true); holder.start();
+        try {
+            assertTrue(held.await(5, TimeUnit.SECONDS));
+            PhoneAlarmState.Snapshot timeout = PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+            assertFalse(timeout.verified);
+            assertEquals("The ledger's availability is preserved", AlarmStateProtocol.Availability.NO_ACCESS, timeout.availability);
+            assertEquals("But this invocation never got an ADT response", AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED,
+                timeout.refreshFailure);
+            assertEquals(1, queries); assertEquals(0, recoveries);
+        } finally { release.countDown(); holder.join(5_000); }
+        assertFalse(holder.isAlive());
+    }
+    @Test public void failedPreflightRecordsItsCorrelationWithoutPrivateResponseFields() throws Exception {
+        bind();
+        String request = "01234567-89ab-cdef-0123-456789abcdef";
+        answer = new AdtPortalClient.Result(AdtPortalClient.Status.VERIFY_LOGIN, AlarmStateProtocol.State.UNKNOWN,
+            "secret-system", "secret-partition", "secret-home", "secret-panel", 1);
+        PhoneAlarmState.Snapshot failed = PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER,
+            AlarmAction.ARM_STAY, request);
+        assertEquals(AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED, failed.refreshFailure);
+        assertEquals(1, queries); assertEquals(1, recoveries);
+        String log = new String(Files.readAllBytes(new File(context.getFilesDir(), RequestDiagnostics.FILE_NAME).toPath()),
+            StandardCharsets.UTF_8);
+        assertTrue(log.contains("action=ARM_STAY request=" + RequestDiagnostics.token(request)));
+        assertTrue(log.contains("reason=SIGN_IN_REQUIRED status=VERIFY_LOGIN code=SESSION/NONE"));
+        assertFalse(log.contains(request)); assertFalse(log.contains("secret-"));
+    }
+    @Test public void exceptionAndChangedBindingProduceTheirOwnFailureWithoutLoggingExceptionText() throws Exception {
+        bind();
+        PhoneAlarmState.queryOperation = (app, deadline) -> { queries++; throw new IllegalStateException("secret-cookie"); };
+        assertEquals(AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED,
+            PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER).refreshFailure);
+        String log = new String(Files.readAllBytes(new File(context.getFilesDir(), RequestDiagnostics.FILE_NAME).toPath()),
+            StandardCharsets.UTF_8);
+        assertTrue(log.contains("outcome=EXCEPTION")); assertFalse(log.contains("secret-cookie"));
+        PhoneAlarmState.queryOperation = (app, deadline) -> {
+            queries++; AdtPortalSession.bind(app, "new-system", "new-partition"); return answer;
+        };
+        assertEquals(AlarmStateProtocol.DeclineReason.SETUP_REQUIRED,
+            PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER).refreshFailure);
+        assertEquals(2, queries); assertEquals(0, recoveries);
     }
     @Test public void aConfirmationReadMustHaveStartedAfterTheCommand() {
         bind(); read();

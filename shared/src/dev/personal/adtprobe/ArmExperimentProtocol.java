@@ -19,6 +19,7 @@ public final class ArmExperimentProtocol {
     // The phone measures this independently from when it issues its challenge.
     public static final long PHONE_CHALLENGE_TIMEOUT_MS = 20_000L;
     private static final String HEADER = "ADT-ALARM/2";
+    private static final String RESULT_HEADER = "ADT-ALARM/3";
 
     public enum Kind { PREPARE, CHALLENGE, COMMIT, RESULT }
     public enum Outcome { REQUESTED, REJECTED }
@@ -35,13 +36,16 @@ public final class ArmExperimentProtocol {
         public final String requestId;
         public final String challengeId;
         public final Outcome outcome;
+        public final AlarmStateProtocol.DeclineReason rejectionReason;
 
-        private Message(Kind kind, AlarmAction action, String requestId, String challengeId, Outcome outcome) {
+        private Message(Kind kind, AlarmAction action, String requestId, String challengeId, Outcome outcome,
+                AlarmStateProtocol.DeclineReason rejectionReason) {
             this.kind = kind;
             this.action = action;
             this.requestId = requestId;
             this.challengeId = challengeId;
             this.outcome = outcome;
+            this.rejectionReason = rejectionReason;
         }
     }
 
@@ -53,7 +57,8 @@ public final class ArmExperimentProtocol {
             if (c != '\n' && (c < 32 || c > 126)) return null;
         }
         String[] fields = new String(payload, StandardCharsets.US_ASCII).split("\n", -1);
-        if (fields.length < 4 || !HEADER.equals(fields[0]) || !validUuid(fields[3])) return null;
+        if (fields.length < 4 || !(HEADER.equals(fields[0]) || RESULT_HEADER.equals(fields[0]))
+                || !validUuid(fields[3])) return null;
         final Kind kind;
         final AlarmAction action;
         try {
@@ -61,16 +66,24 @@ public final class ArmExperimentProtocol {
             action = AlarmAction.valueOf(fields[2]);
         }
         catch (IllegalArgumentException error) { return null; }
-        int count = kind == Kind.PREPARE ? 4 : kind == Kind.RESULT ? 6 : 5;
+        boolean reasonedResult = RESULT_HEADER.equals(fields[0]);
+        if (reasonedResult && kind != Kind.RESULT) return null;
+        int count = kind == Kind.PREPARE ? 4 : kind == Kind.RESULT ? (reasonedResult ? 7 : 6) : 5;
         if (fields.length != count) return null;
         String challenge = kind == Kind.PREPARE ? null : fields[4];
         if (challenge != null && !validUuid(challenge)) return null;
         Outcome outcome = null;
+        AlarmStateProtocol.DeclineReason reason = null;
         if (kind == Kind.RESULT) {
             try { outcome = Outcome.valueOf(fields[5]); }
             catch (IllegalArgumentException error) { return null; }
+            if (outcome == Outcome.REJECTED) {
+                try { reason = reasonedResult ? AlarmStateProtocol.DeclineReason.valueOf(fields[6])
+                        : AlarmStateProtocol.DeclineReason.UNAVAILABLE; }
+                catch (IllegalArgumentException error) { return null; }
+            } else if (reasonedResult && !"-".equals(fields[6])) return null;
         }
-        return new Message(kind, action, fields[3], challenge, outcome);
+        return new Message(kind, action, fields[3], challenge, outcome, reason);
     }
 
     public static Message parse(byte[] payload, Kind expected) {
@@ -103,7 +116,17 @@ public final class ArmExperimentProtocol {
         return encode(Kind.COMMIT, action, request, challenge, null);
     }
     public static byte[] encodeResult(AlarmAction action, String request, String challenge, Outcome outcome) {
-        return encode(Kind.RESULT, action, request, challenge, outcome);
+        return encodeResult(action, request, challenge, outcome,
+            outcome == Outcome.REJECTED ? AlarmStateProtocol.DeclineReason.UNAVAILABLE : null);
+    }
+    public static byte[] encodeResult(AlarmAction action, String request, String challenge, Outcome outcome,
+            AlarmStateProtocol.DeclineReason reason) {
+        if (outcome == null || (outcome == Outcome.REJECTED ? reason == null : reason != null))
+            throw new IllegalArgumentException("Invalid alarm experiment result");
+        // Validation remains shared with the unchanged executable-message encoder.
+        String result = new String(encode(Kind.RESULT, action, request, challenge, outcome), StandardCharsets.US_ASCII);
+        return (RESULT_HEADER + result.substring(HEADER.length()) + "\n" + (reason == null ? "-" : reason.name()))
+            .getBytes(StandardCharsets.US_ASCII);
     }
 
     /** Watch-only memory state. Caller performs network sends after receiving encoded bytes. */
@@ -118,6 +141,7 @@ public final class ArmExperimentProtocol {
         private String challenge;
         private Phase phase = Phase.DISCOVERING;
         private Outcome outcome;
+        private AlarmStateProtocol.DeclineReason rejectionReason;
 
         public Attempt(AlarmAction action, long elapsedNow) { this(action, UUID.randomUUID().toString(), elapsedNow); }
 
@@ -134,6 +158,7 @@ public final class ArmExperimentProtocol {
         public synchronized String challengeId() { return challenge; }
         public synchronized Phase phase() { return phase; }
         public synchronized Outcome outcome() { return outcome; }
+        public synchronized AlarmStateProtocol.DeclineReason rejectionReason() { return rejectionReason; }
 
         /** Expiry is terminal, including a backward/reset local elapsed clock. */
         public synchronized boolean isActive(long now) {
@@ -178,6 +203,7 @@ public final class ArmExperimentProtocol {
             AlarmStateProtocol.Declined refusal = AlarmStateProtocol.parseDeclined(payload);
             if (refusal == null || refusal.action != action || !request.equals(refusal.request)) return false;
             outcome = Outcome.REJECTED;
+            rejectionReason = refusal.reason;
             phase = Phase.FINISHED;
             return true;
         }
@@ -204,6 +230,7 @@ public final class ArmExperimentProtocol {
             // Only rejection is meaningful then; REQUESTED still requires our prior commit.
             if (phase == Phase.CONFIRMABLE && message.outcome != Outcome.REJECTED) return false;
             outcome = message.outcome;
+            rejectionReason = message.rejectionReason;
             phase = Phase.FINISHED;
             return true;
         }

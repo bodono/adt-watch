@@ -1,6 +1,6 @@
 # How ADT Watch works
 
-The v0.26 architecture separates status queries from alarm execution. The phone
+The v0.27 architecture separates status queries from alarm execution. The phone
 and Wear modules share application ID `dev.personal.adtprobe` and a signing
 identity. Google Play Services carries bounded, source-matched messages between
 them. Live-query integration is undergoing validation.
@@ -224,7 +224,7 @@ coloured control.
 Pure and Robolectric tests use invented HTTP responses, inert widgets and
 simulated lifecycle events. They do not contact ADT or operate an alarm.
 Earlier personal-device checks verified the native widget route with a locked
-phone and ADT battery usage Unrestricted. They do not establish v0.26 live-query
+phone and ADT battery usage Unrestricted. They do not establish v0.27 live-query
 compatibility, session longevity or reliable overnight operation. Those require
 separate physical verification.
 
@@ -238,6 +238,25 @@ Setup failures have closed diagnostic codes containing only a request stage,
 error category and optional HTTP status. They never include cookies, URLs,
 account identifiers, response bodies or exception messages. Starting another
 check, a UI timeout or cancellation replaces the previous diagnostic.
+
+Routine requests also have durable diagnostics in the phone's private
+`request-diagnostics.log` and `.1` files, each limited to 128 KiB. They record
+UTC and elapsed times, the selected action, a hash of its random request token,
+the preflight result and its closed check code, and the refusal or native-click
+attempt. Per-call failures distinguish a real authentication response from a
+timeout waiting for another query; an old cached sign-in error cannot supply the
+reason for a new failed read. Login recovery start/results are recorded without
+credentials, cookies, response bodies, account identifiers or exception text.
+Successful passive reads write nothing; repeated identical passive failures are
+consolidated for a minute. Logging itself schedules no work or watch messages.
+
+Preflight declines carry a closed reason. Post-challenge results use
+`ADT-ALARM/3` with a reason for REJECTED and no reason for REQUESTED; executable
+prepare/challenge/commit messages are unchanged. All existing source, action,
+request, challenge and deadline checks apply before a reason reaches the UI.
+The watch displays the previous refusal separately from current status and
+sign-in instructions. Cancellation after the final native-click gate cannot
+claim that the action was never sent. No refusal adds a command retry.
 
 Status timing logs contain only elapsed times, closed state/status values and
 booleans. They distinguish notification arrival, live-query completion and

@@ -183,6 +183,16 @@ final class AdtSessionRecovery {
 
     private static Attempt attempt(Context app, AdtPortalSession.Binding binding, long deadline, boolean manual,
             QueuedAttempt queued) {
+        long started = SystemClock.elapsedRealtime();
+        RequestDiagnostics.recovery(app, RequestDiagnostics.RecoveryStage.START, manual, "STARTED", 0);
+        Attempt outcome = performAttempt(app, binding, deadline, manual, queued);
+        RequestDiagnostics.recovery(app, RequestDiagnostics.RecoveryStage.RESULT, manual, outcome.code,
+            SystemClock.elapsedRealtime() - started);
+        return outcome;
+    }
+
+    private static Attempt performAttempt(Context app, AdtPortalSession.Binding binding, long deadline, boolean manual,
+            QueuedAttempt queued) {
         String version = credentials.version(app);
         if (version == null || version.isEmpty() || binding == null) return new Attempt(null, "DISABLED");
         long initialEpoch;

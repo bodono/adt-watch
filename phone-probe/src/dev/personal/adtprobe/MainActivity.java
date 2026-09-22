@@ -53,7 +53,7 @@ public final class MainActivity extends Activity {
             scroll.setPadding(edges.left, edges.top, edges.right, edges.bottom); return insets;
         });
         text("ADT Watch Setup", 28, Color.WHITE);
-        text("Personal app · v0.26", 15, Color.LTGRAY);
+        text("Personal app · v0.27", 15, Color.LTGRAY);
         text("One-tap watch control", 21, Color.WHITE);
         text("Red means ADT reported Armed: tap to Disarm. Green means ADT reported Disarmed: tap to Arm Stay. "
             + "The watch also has an ADT Watch tile you can add to its swipeable tiles.", 16, Color.LTGRAY);
@@ -89,7 +89,7 @@ public final class MainActivity extends Activity {
             + "The paired phone needs to be locked and connected to use the alarm button.", 16, Color.LTGRAY);
         button("Advanced setup…", view -> new AlertDialog.Builder(this).setTitle("Advanced setup")
             .setItems(new String[]{"Configure Arm Stay scene widget", "Configure Disarm scene widget",
-                "Watch pairing", "Arm Stay diagnostic", "Disarm diagnostic", "Earlier diagnostic log"}, (dialog, item) -> {
+                "Watch pairing", "Arm Stay diagnostic", "Disarm diagnostic", "Request diagnostic log", "Earlier diagnostic log"}, (dialog, item) -> {
                 if (item < 2) startActivity(new Intent(this, WidgetSetupActivity.class)
                     .putExtra(AlarmWidgetSlot.ACTION_EXTRA, item == 0 ? "ARM_STAY" : "DISARM"));
                 else if (item == 2) startActivity(new Intent(this, WatchSetupActivity.class));
@@ -98,9 +98,10 @@ public final class MainActivity extends Activity {
                 else {
                     ScrollView logScroll = new ScrollView(this);
                     TextView log = new TextView(this);
-                    log.setText(Probe.events(this)); log.setTextSize(13); log.setTextIsSelectable(true);
+                    log.setText(item == 5 ? RequestDiagnostics.recent(this) : Probe.events(this));
+                    log.setTextSize(13); log.setTextIsSelectable(true);
                     log.setPadding(dp(18), dp(12), dp(18), dp(12)); logScroll.addView(log);
-                    new AlertDialog.Builder(this).setTitle("Earlier diagnostic log").setView(logScroll)
+                    new AlertDialog.Builder(this).setTitle(item == 5 ? "Request diagnostic log" : "Earlier diagnostic log").setView(logScroll)
                         .setPositiveButton("Close", null).show();
                 }
             }).setNegativeButton("Close", null).show());

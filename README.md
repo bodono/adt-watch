@@ -4,7 +4,7 @@ A personal, unofficial Wear OS app for controlling a UK ADT Smart Services
 alarm through the ADT app on a paired Android phone. It is not affiliated with
 or supported by ADT or Alarm.com.
 
-The v0.26 integration uses a read-only ADT website query for status and native
+The v0.27 integration uses a read-only ADT website query for status and native
 ADT scene widgets for alarm requests. This version is being validated; earlier
 personal-device checks do not establish reliability of the new live-query flow.
 
@@ -19,6 +19,11 @@ The watch has one large alarm button and a swipeable **ADT Watch** Tile:
 There is no second confirmation. A coloured Tile tap opens the app and continues
 that same request. A watch PIN or pattern is optional; an existing watch lock is
 respected. The app never automatically retries an alarm command.
+
+If a request is refused, the watch shows the reason separately from the current
+alarm status: for example, the phone was unlocked, ADT needed sign-in, or its
+status check failed. The phone retains private, bounded request diagnostics for
+later investigation, available under **Advanced setup… → Request diagnostic log**.
 
 Keep the paired phone powered, **locked**, connected and signed into the native
 ADT app. Set the **ADT app's battery usage to Unrestricted** so Android allows

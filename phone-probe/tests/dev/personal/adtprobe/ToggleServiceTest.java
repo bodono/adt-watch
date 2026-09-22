@@ -64,7 +64,8 @@ public final class ToggleServiceTest {
     private final List<Decline> declines = new ArrayList<>();
     private ArmExperimentService.Responder originalResponder;
     private int validations, rejectValidation = -1;
-    private boolean falseAfterClick, throwAfterClick;
+    private boolean falseAfterClick, throwAfterClick, cancelAfterClick;
+    private int stoppedResults;
 
     @Before public void prepare() {
         context = RuntimeEnvironment.getApplication();
@@ -93,8 +94,15 @@ public final class ToggleServiceTest {
         originalResponder = ReflectionHelpers.getStaticField(ArmExperimentService.class, "responder");
         ReflectionHelpers.setStaticField(ArmExperimentService.class, "responder",
             (ArmExperimentService.Responder) (ignored, node, path, payload) -> {
-                assertEquals(AlarmStateProtocol.DECLINED_PATH, path);
-                declines.add(new Decline(node, AlarmStateProtocol.parseDeclined(payload)));
+                if (ArmExperimentProtocol.RESULT_PATH.equals(path)) {
+                    ArmExperimentProtocol.Message result = ArmExperimentProtocol.parse(payload, ArmExperimentProtocol.Kind.RESULT);
+                    assertNotNull(result);
+                    stoppedResults++;
+                    assertEquals(ArmExperimentProtocol.Outcome.REJECTED, result.outcome);
+                } else {
+                    assertEquals(AlarmStateProtocol.DECLINED_PATH, path);
+                    declines.add(new Decline(node, AlarmStateProtocol.parseDeclined(payload)));
+                }
             });
     }
 
@@ -163,7 +171,7 @@ public final class ToggleServiceTest {
         noStart();
         assertEquals("The tap got no read of its own", before + 1, queryCalls);
         assertEquals(1, declines.size());
-        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED, declines.get(0).refusal.reason);
         assertEquals(request, declines.get(0).refusal.request);
         PhoneAlarmState.Snapshot display = PhoneAlarmState.snapshot(context);
         assertEquals("The display keeps its earlier observation", AlarmStateProtocol.Availability.READY, display.availability);
@@ -205,7 +213,7 @@ public final class ToggleServiceTest {
         assertEquals("No ADT read precedes a tap the phone cannot serve", before, queryCalls);
         assertEquals(1, declines.size());
         assertEquals(NODE, declines.get(0).node);
-        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.DeclineReason.PHONE_UNLOCKED, declines.get(0).refusal.reason);
         assertEquals(request, declines.get(0).refusal.request);
         locked(true);
         assertNotNull(queue());
@@ -215,6 +223,9 @@ public final class ToggleServiceTest {
         assertEquals("A tap during a queued session is declined without a read", during, queryCalls);
         assertEquals(2, declines.size());
         assertEquals(other, declines.get(1).refusal.request);
+        assertEquals(AlarmStateProtocol.DeclineReason.PHONE_BUSY, declines.get(1).refusal.reason);
+        assertDiagnostic(request, "PHONE_UNLOCKED");
+        assertDiagnostic(other, "PHONE_BUSY");
     }
 
     @Test public void aTapRefusedOnTheWorkerCannotBecomeAGrantOnceThePhoneLocks() {
@@ -228,7 +239,7 @@ public final class ToggleServiceTest {
         noStart();
         assertEquals("The skipped preflight cannot be replaced by the cached state", before, queryCalls);
         assertEquals(1, declines.size());
-        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.DeclineReason.PHONE_UNLOCKED, declines.get(0).refusal.reason);
         assertEquals(AlarmStateProtocol.State.DISARMED, PhoneAlarmState.snapshot(context).state);
     }
 
@@ -239,7 +250,7 @@ public final class ToggleServiceTest {
         noStart();
         assertEquals(before, queryCalls);
         assertEquals(1, declines.size());
-        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.DeclineReason.SETUP_REQUIRED, declines.get(0).refusal.reason);
         assertEquals(AlarmAction.ARM_STAY, declines.get(0).refusal.action);
     }
 
@@ -249,11 +260,95 @@ public final class ToggleServiceTest {
         receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
         noStart();
         assertEquals(1, declines.size());
-        assertEquals(AlarmStateProtocol.DeclineReason.UNAVAILABLE, declines.get(0).refusal.reason);
+        assertEquals(AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED, declines.get(0).refusal.reason);
         assertTrue("The failed preflight read is what blocks the command", PhoneAlarmState.snapshot(context).readFailed);
         assertEquals("The earlier fresh observation still colours the watch", AlarmStateProtocol.Availability.READY,
             PhoneAlarmState.snapshot(context).availability);
         assertEquals(0, clicks);
+    }
+
+    @Test public void authenticationRefusalKeepsItsReasonAndRequestInDurableDiagnostics() throws Exception {
+        queryResult = new AdtPortalClient.Result(AdtPortalClient.Status.VERIFY_LOGIN,
+            AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 10);
+        receive(NODE, AlarmStateProtocol.TOGGLE_PATH, tap(AlarmAction.ARM_STAY, revision));
+        noStart();
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED, declines.get(0).refusal.reason);
+        assertDiagnostic(request, "SIGN_IN_REQUIRED");
+        String log = diagnostics();
+        assertTrue(log.contains("stage=TAP action=ARM_STAY request=" + RequestDiagnostics.token(request)));
+        assertTrue(log.contains("stage=QUERY_RESULT action=ARM_STAY request=" + RequestDiagnostics.token(request)));
+        assertTrue(log.contains("status=VERIFY_LOGIN"));
+        assertEquals(0, clicks);
+    }
+
+    @Test public void postChallengeWidgetRefreshRecordsASpecificRefusalWithoutAClick() {
+        create(queue()); installInertReadyHost(); setChallenge();
+        // WidgetHostSessionTest proves every real RemoteViews update advances this generation.
+        ReflectionHelpers.setField(inertHost, "generation", inertHost.renderGeneration() + 1);
+        invokeCommit();
+        assertEquals(0, clicks);
+        assertFalse(PhoneAlarmState.snapshot(context).pending);
+        assertDiagnostic(request, "WIDGET_CHANGED");
+    }
+
+    @Test public void queuedCancellationStillRecordsItsRequestBeforeServiceCreation() {
+        Intent start = queue();
+        ArmExperimentService.cancelForNavigation(context);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.ACCESS_CHANGED, declines.get(0).refusal.reason);
+        assertDiagnostic(request, "ACCESS_CHANGED");
+        create(start);
+        assertEquals(Boolean.TRUE, member(service, "stopped"));
+        assertEquals(0, clicks);
+    }
+
+    @Test public void signInLossAfterPreflightIsNotMisreportedAsChangedAlarmState() {
+        create(queue());
+        queryResult = new AdtPortalClient.Result(AdtPortalClient.Status.VERIFY_LOGIN,
+            AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 10);
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1_001));
+        PhoneAlarmState.refresh(context, 0);
+        assertEquals(Boolean.FALSE, ReflectionHelpers.callInstanceMethod(service, "live"));
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED, declines.get(0).refusal.reason);
+        assertDiagnostic(request, "SIGN_IN_REQUIRED");
+        assertEquals(0, clicks);
+    }
+
+    @Test public void reentrantCancellationAfterNativeClickNeverClaimsNotSent() {
+        create(queue()); installInertReadyHost(); setChallenge();
+        cancelAfterClick = true;
+        invokeCommit();
+        assertEquals(1, clicks);
+        assertTrue(PhoneAlarmState.snapshot(context).pending);
+        assertTrue(declines.isEmpty());
+        assertEquals(0, stoppedResults);
+        assertFalse(diagnostics().contains("stage=DECLINED"));
+        invokeCommit();
+        assertEquals(1, clicks);
+    }
+
+    @Test public void cancelledReadinessReportsItsOwnReasonAndCannotClickLater() {
+        create(queue());
+        ArmExperimentService.cancelForNavigation(context);
+        assertEquals(1, declines.size());
+        assertEquals(AlarmStateProtocol.DeclineReason.ACCESS_CHANGED, declines.get(0).refusal.reason);
+        assertEquals(request, declines.get(0).refusal.request);
+        assertDiagnostic(request, "ACCESS_CHANGED");
+        invokeCommit();
+        assertEquals(0, clicks);
+    }
+
+    private void assertDiagnostic(String requestId, String reason) {
+        String line = "stage=DECLINED action=ARM_STAY request=" + RequestDiagnostics.token(requestId) + " reason=" + reason;
+        assertTrue(diagnostics(), diagnostics().contains(line));
+        assertFalse("Raw request identities must not be retained", diagnostics().contains(requestId));
+    }
+
+    private String diagnostics() {
+        try { return new String(java.nio.file.Files.readAllBytes(context.getFileStreamPath(RequestDiagnostics.FILE_NAME).toPath()), java.nio.charset.StandardCharsets.UTF_8); }
+        catch (java.io.IOException error) { throw new AssertionError(error); }
     }
 
     @Test public void transientReadFailureAfterThePreflightDoesNotCancelTheSession() {
@@ -426,6 +521,7 @@ public final class ToggleServiceTest {
             assertEquals("PENDING", context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getString("outcome", ""));
             assertEquals(request, context.getSharedPreferences(PhoneAlarmState.PREFERENCES, Context.MODE_PRIVATE).getString("request", ""));
             clicks++;
+            if (cancelAfterClick) ArmExperimentService.cancelForNavigation(context);
         });
         ImageView scene = new ImageView(context); scene.setId(SCENE); view.addView(scene);
         View cancel = new View(context); cancel.setId(CANCEL); cancel.setVisibility(View.GONE); view.addView(cancel);

@@ -36,8 +36,8 @@ subprojects {
             applicationId 'dev.personal.adtprobe'
             minSdk 30
             targetSdk 36
-            versionCode 26
-            versionName '0.26'
+            versionCode 27
+            versionName '0.27'
         }
         signingConfigs {
             debug {

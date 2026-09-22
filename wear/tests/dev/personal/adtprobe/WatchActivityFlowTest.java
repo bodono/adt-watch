@@ -256,7 +256,7 @@ public final class WatchActivityFlowTest {
             Context.MODE_PRIVATE), "contactReceived");
         stopQueryTransport();
         Shadows.shadowOf(Looper.getMainLooper()).idle();
-        assertTrue(controls().alarmButton.getText().toString().contains("Sign in to ADT"));
+        assertTrue(controls().alarmButton.getText().toString().contains("Sign in via ADT Watch Setup"));
         assertFalse(controls().alarmButton.isEnabled());
         assertEquals(1, sent.size());
         assertEquals(0, commits());
@@ -279,7 +279,7 @@ public final class WatchActivityFlowTest {
             assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
             assertEquals(1, sent.size());
             assertEquals(0, commits());
-            assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+            assertTrue(controls().noticeView.getText().toString().contains("Not sent"));
 
             // The phone's later state report may offer the opposite action, but
             // the refused tap has no authority to perform it or accept a late challenge.
@@ -348,7 +348,7 @@ public final class WatchActivityFlowTest {
                 AlarmAction.ARM_STAY, selected.request, AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode());
         stopQueryTransport();
         assertNull(attempt());
-        assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+        assertTrue(controls().noticeView.getText().toString().contains("Not sent"));
 
         // The status refresh that follows re-enables the button; the decline must survive it.
         advance(2_001);
@@ -358,13 +358,13 @@ public final class WatchActivityFlowTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         render();
         assertTrue(controls().alarmButton.isEnabled());
-        assertTrue("The decline stays readable after the refresh", controls().alarmButton.getText().toString().contains("Not sent"));
+        assertTrue("The decline stays readable after the refresh", controls().noticeView.getText().toString().contains("Not sent"));
         tap();
         assertEquals("The next deliberate tap clears the notice and sends a fresh request", 2, sent.size());
-        assertFalse(controls().alarmButton.getText().toString().contains("Not sent"));
+        assertFalse(controls().noticeView.getText().toString().contains("Not sent"));
     }
 
-    @Test public void aCurrentProblemOutranksTheDeclineNoticeUntilTheControlIsUsableAgain() {
+    @Test public void currentSignInInstructionsAndHistoricalRefusalRemainVisibleTogether() {
         report(AlarmStateProtocol.State.DISARMED);
         mount(new Intent(Intent.ACTION_MAIN), null, true);
         tap();
@@ -372,7 +372,7 @@ public final class WatchActivityFlowTest {
         handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(
                 AlarmAction.ARM_STAY, selected.request, AlarmStateProtocol.DeclineReason.UNAVAILABLE).encode());
         stopQueryTransport();
-        assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+        assertTrue(controls().noticeView.getText().toString().contains("Not sent"));
 
         // The correlated status answer that follows says the phone's ADT sign-in has lapsed.
         advance(2_001);
@@ -388,8 +388,9 @@ public final class WatchActivityFlowTest {
         render();
         assertFalse(controls().alarmButton.isEnabled());
         String text = controls().alarmButton.getText().toString();
-        assertTrue("The newer recovery instruction shows", text.contains("Sign in to ADT"));
-        assertFalse("The historical notice does not hide it", text.contains("Not sent"));
+        assertTrue("The newer recovery instruction shows", text.contains("Sign in via ADT Watch Setup"));
+        assertFalse("The historical notice stays outside the circle", text.contains("Not sent"));
+        assertTrue(controls().noticeView.getText().toString().contains("Not sent"));
 
         // Once the control is usable again, the tap that was never sent is still worth knowing about.
         advance(2_001);
@@ -399,7 +400,7 @@ public final class WatchActivityFlowTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle();
         render();
         assertTrue(controls().alarmButton.isEnabled());
-        assertTrue(controls().alarmButton.getText().toString().contains("Not sent"));
+        assertTrue(controls().noticeView.getText().toString().contains("Not sent"));
         assertEquals(1, sent.size());
     }
 
@@ -425,6 +426,118 @@ public final class WatchActivityFlowTest {
         handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
                 ArmExperimentProtocol.encodeChallenge(selected.action, selected.request, UUID.randomUUID().toString()));
         assertEquals("A correctly matched challenge still commits once", 1, commits());
+    }
+
+    @Test public void preflightRefusalExplainsTheActualProblemAndSurvivesARefresh() {
+        report(AlarmStateProtocol.State.DISARMED);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        byte[] refusal = new AlarmStateProtocol.Declined(selected.action, selected.request,
+            AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED).encode();
+        handle("other-phone", AlarmStateProtocol.DECLINED_PATH, refusal);
+        assertNotNull(attempt());
+        assertEquals(View.GONE, controls().noticeView.getVisibility());
+        handle(PHONE, AlarmStateProtocol.DECLINED_PATH, refusal);
+        stopQueryTransport();
+        assertNull(attempt());
+        assertTrue(controls().noticeView.getText().toString().contains("ADT needed sign-in"));
+        assertEquals(0, commits());
+        advance(2_001);
+        report(AlarmStateProtocol.State.DISARMED);
+        render();
+        assertTrue("A successful status refresh must not erase the refused tap's explanation",
+            controls().noticeView.getText().toString().contains("ADT needed sign-in"));
+        assertFalse("Once recovered, the history must not demand another login",
+            controls().noticeView.getText().toString().contains("Sign in"));
+        assertTrue(controls().alarmButton.getText().toString().contains("ADT checked"));
+        assertEquals(1, sent.size());
+    }
+
+    @Test public void preciseRefusalRemainsVisibleWhenTheFollowUpStatusIsUnavailable() {
+        for (AlarmStateProtocol.Availability unavailable : new AlarmStateProtocol.Availability[] {
+                AlarmStateProtocol.Availability.OFFLINE, AlarmStateProtocol.Availability.NO_STATE,
+                AlarmStateProtocol.Availability.STALE, AlarmStateProtocol.Availability.BUSY,
+                AlarmStateProtocol.Availability.SETUP}) {
+            closeActivity(); resetStore(); sent.clear();
+            report(AlarmStateProtocol.State.DISARMED);
+            mount(new Intent(Intent.ACTION_MAIN), null, true);
+            tap();
+            AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+            handle(PHONE, AlarmStateProtocol.DECLINED_PATH, new AlarmStateProtocol.Declined(selected.action,
+                selected.request, AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED).encode());
+            stopQueryTransport();
+            advance(2_001);
+            WatchAlarmStore.Query query = WatchAlarmStore.beginQuery(now());
+            assertNotNull(query);
+            assertTrue(WatchAlarmStore.selectSource(context, query, PHONE, now(), BOOT));
+            assertTrue(WatchAlarmStore.accept(context, PHONE, new AlarmStateProtocol.Report(query.nonce,
+                AlarmStateProtocol.State.UNKNOWN, unavailable, "-", 0), now(), BOOT));
+            render();
+            assertFalse(controls().alarmButton.isEnabled());
+            assertEquals(View.VISIBLE, controls().noticeView.getVisibility());
+            assertTrue(controls().noticeView.getText().toString().contains("ADT status check failed"));
+            assertTrue("Current recovery detail remains visible independently: " + unavailable,
+                controls().alarmButton.getText().toString().contains(WatchAlarmStore.read(context).detail));
+            assertFalse(controls().alarmButton.getText().toString().contains("Not sent"));
+            assertEquals(0, commits());
+            assertEquals(1, sent.size());
+        }
+    }
+
+    @Test public void postChallengeReasonShowsOnlyForItsMatchedRequestAndDoesNotResend() {
+        report(AlarmStateProtocol.State.DISARMED);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        String challenge = UUID.randomUUID().toString();
+        handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+            ArmExperimentProtocol.encodeChallenge(selected.action, selected.request, challenge));
+        ArmExperimentProtocol.Attempt active = attempt();
+        byte[] refusal = ArmExperimentProtocol.encodeResult(selected.action, selected.request, challenge,
+            ArmExperimentProtocol.Outcome.REJECTED, AlarmStateProtocol.DeclineReason.WIDGET_CHANGED);
+        handle("other-phone", ArmExperimentProtocol.RESULT_PATH, refusal);
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(selected.action,
+            UUID.randomUUID().toString(), challenge, ArmExperimentProtocol.Outcome.REJECTED,
+            AlarmStateProtocol.DeclineReason.PHONE_UNLOCKED));
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(selected.action,
+            selected.request, UUID.randomUUID().toString(), ArmExperimentProtocol.Outcome.REJECTED,
+            AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED));
+        assertSame(active, attempt());
+        assertNull(active.rejectionReason());
+        assertFalse(controls().noticeView.getText().toString().contains("Not sent"));
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, refusal);
+        stopQueryTransport();
+        assertNull(attempt());
+        assertFalse(stored().getBoolean("busy", false));
+        assertFalse(stored().getBoolean("commitMayHaveBeenSent", false));
+        assertTrue(controls().noticeView.getText().toString().contains("ADT control refreshed"));
+        assertEquals(1, commits());
+        assertEquals(2, sent.size());
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(selected.action,
+            selected.request, challenge, ArmExperimentProtocol.Outcome.REJECTED,
+            AlarmStateProtocol.DeclineReason.PHONE_UNLOCKED));
+        assertTrue("A late competing result cannot replace the accepted explanation",
+            controls().noticeView.getText().toString().contains("ADT control refreshed"));
+        assertEquals(2, sent.size());
+    }
+
+    @Test public void expiredReasonedResultCannotReplaceUncertainStatusOrClearPossibleSend() {
+        report(AlarmStateProtocol.State.DISARMED);
+        mount(new Intent(Intent.ACTION_MAIN), null, true);
+        tap();
+        AlarmStateProtocol.Tap selected = AlarmStateProtocol.parseTap(sent.get(0).payload);
+        String challenge = UUID.randomUUID().toString();
+        handle(PHONE, ArmExperimentProtocol.CHALLENGE_PATH,
+            ArmExperimentProtocol.encodeChallenge(selected.action, selected.request, challenge));
+        advance(ArmExperimentProtocol.RESULT_TIMEOUT_MS);
+        handle(PHONE, ArmExperimentProtocol.RESULT_PATH, ArmExperimentProtocol.encodeResult(selected.action,
+            selected.request, challenge, ArmExperimentProtocol.Outcome.REJECTED,
+            AlarmStateProtocol.DeclineReason.PHONE_UNLOCKED));
+        render();
+        assertTrue(stored().getBoolean("commitMayHaveBeenSent", false));
+        assertFalse(controls().noticeView.getText().toString().contains("Lock your phone"));
+        assertEquals(1, commits());
     }
 
     @Test public void earlyRefusalAfterCommitCannotEraseAnUncertainResult() {

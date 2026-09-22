@@ -28,6 +28,7 @@ final class AlarmToggleView extends ScrollView {
     final LinearLayout content;
     final TextView titleView;
     final TextView statusView;
+    final TextView noticeView;
     final Button alarmButton;
     final Button refreshButton;
     private final Consumer<AlarmAction> activate;
@@ -52,6 +53,13 @@ final class AlarmToggleView extends ScrollView {
         statusView.setEllipsize(TextUtils.TruncateAt.END);
         statusView.setAccessibilityLiveRegion(ACCESSIBILITY_LIVE_REGION_POLITE);
         add(statusView, 164, Math.max(dp(22), statusView.getLineHeight()), 0);
+
+        // Refusals describe the preceding tap independently from the current alarm state.
+        // Keep them outside the fixed circle so they can wrap fully, including at large type.
+        noticeView = text("", 14, Color.WHITE);
+        noticeView.setAccessibilityLiveRegion(ACCESSIBILITY_LIVE_REGION_POLITE);
+        noticeView.setVisibility(View.GONE);
+        add(noticeView, 164, ViewGroup.LayoutParams.WRAP_CONTENT, 4);
 
         alarmButton = new Button(context);
         alarmButton.setAllCaps(false);
@@ -86,12 +94,20 @@ final class AlarmToggleView extends ScrollView {
     }
 
     void render(String statusText, AlarmAction action, boolean enabled, String detail) {
+        render(statusText, action, enabled, detail, null);
+    }
+
+    void render(String statusText, AlarmAction action, boolean enabled, String detail, String notice) {
         String state = statusText == null ? "Status unknown" : statusText;
         String explanation = detail == null ? "" : detail;
+        String refusal = notice == null ? "" : notice;
         boolean available = action != null && enabled;
-        if (renderedAction != action || alarmButton.isEnabled() != available) cancelAlarmGesture();
+        if (renderedAction != action || alarmButton.isEnabled() != available
+                || !refusal.contentEquals(noticeView.getText())) cancelAlarmGesture();
         renderedAction = action;
         statusView.setText(state);
+        noticeView.setText(refusal);
+        noticeView.setVisibility(refusal.isEmpty() ? View.GONE : View.VISIBLE);
         alarmButton.setEnabled(available);
         alarmButton.setTextSize(action == null ? 20 : 22);
         boolean working = action == null && ("Sending request".equals(state) || "Checking alarm".equals(state));

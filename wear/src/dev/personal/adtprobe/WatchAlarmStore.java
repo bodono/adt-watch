@@ -724,7 +724,7 @@ final class WatchAlarmStore {
     private static ViewState neutral(String label, String detail) { return new ViewState(label, detail, "", null, false); }
     private static String detail(AlarmStateProtocol.Availability state) {
         switch (state) {
-            case NO_ACCESS: return "Sign in to ADT on your phone";
+            case NO_ACCESS: return "Sign in via ADT Watch Setup on phone";
             case SETUP: return "Finish alarm setup on your phone";
             case BUSY: return "Phone reached; waiting for ADT";
             case STALE: return "An up-to-date ADT report is needed";

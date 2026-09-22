@@ -14,7 +14,13 @@ public final class AlarmStateProtocol {
     public static final long QUERY_FRESH_MS = 60_000;
     public enum State { UNKNOWN, DISARMED, ARMED_STAY, ARMED_AWAY }
     public enum Availability { READY, NO_ACCESS, NO_STATE, STALE, BUSY, SETUP, OFFLINE }
-    public enum DeclineReason { STATE_CHANGED, UNAVAILABLE, ALREADY_SATISFIED }
+    public enum DeclineReason {
+        STATE_CHANGED, UNAVAILABLE, ALREADY_SATISFIED,
+        PHONE_UNLOCKED, PHONE_BUSY, SETUP_OPEN, SETUP_REQUIRED, WATCH_CHANGED,
+        SIGN_IN_REQUIRED, STATUS_CHECK_FAILED, STATUS_UNAVAILABLE, ALARM_BUSY,
+        WIDGET_CHANGED, WIDGET_NOT_READY, REQUEST_EXPIRED, ACCESS_CHANGED,
+        START_FAILED, INTERNAL_ERROR, FINAL_CHECK_FAILED
+    }
     public enum Evidence { ADT_NOTIFICATION, PHONE_CHECK, ADT_QUERY }
     /** Only a user-initiated check may recover an expired session with saved credentials. */
     public enum QueryIntent { USER, PASSIVE }

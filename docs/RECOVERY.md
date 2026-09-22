@@ -1,6 +1,6 @@
 # Install and recover ADT Watch
 
-This guide describes v0.26, whose live-query integration is undergoing
+This guide describes v0.27, whose live-query integration is undergoing
 validation. Rebuilding the apps does not recreate their private device setup.
 The owner completes native widget consent, watch association, routine approval
 and both ADT sign-ins on their devices.
@@ -84,8 +84,9 @@ adb -d install -r build/phone-probe.apk
 data. If Android reports an incompatible signature, check the restored key;
 do not treat uninstalling as a routine update step. Keep the phone and watch
 builds at the same version and signature. Update the watch first, then the phone.
-Update both apps to v0.26 for explicit user/passive status queries. A mixed pair
-does not provide the complete fix for idle login alerts.
+v0.26 introduced explicit user/passive status queries; v0.27 adds detailed
+refusal messages. Update both apps so the phone and watch understand the same
+status and refusal messages.
 After updating an earlier installation, complete the new website sign-in and
 explicit system selection below; existing native ADT sign-in is not enough.
 An existing sign-in and system selection in this helper are retained by an
@@ -196,7 +197,7 @@ controls without waiting for a notification; the earlier uncertain request is
 not automatically repeated. Native ADT work already queued can execute later.
 
 Earlier native-widget cycles worked with the phone locked and ADT set to
-Unrestricted. v0.26 live queries, session longevity and reliable overnight use
+Unrestricted. v0.27 live queries, session longevity and reliable overnight use
 still require physical verification.
 
 ## Optional automatic login
@@ -234,6 +235,22 @@ including account details.
 
 ## Changes and troubleshooting
 
+- **A request is refused:** v0.27 shows the specific refusal separately from
+  current status and recovery instructions. Update both phone and watch for
+  these messages. In **ADT Watch Setup → Advanced setup… → Request diagnostic
+  log**, the phone retains recent attempts and failure reasons across restarts.
+  The full private log rotates between two 128 KiB files; the on-phone viewer
+  shows the latest portion. To save both from a connected development phone:
+
+  ```sh
+  adb -d exec-out run-as dev.personal.adtprobe cat files/request-diagnostics.log.1 > requests-previous.log
+  adb -d exec-out run-as dev.personal.adtprobe cat files/request-diagnostics.log > requests-current.log
+  ```
+
+  The previous file exists only after the first rotation. These logs contain
+  times, action names, short request hashes and closed diagnostic codes, never
+  passwords, cookies or account details. Logging sends no alarm requests and
+  adds no background timers.
 - **Grey or uncertain after a tap:** do not repeat the tap immediately. Check
   the actual state in ADT and let queued work settle. After 30 seconds, progress
   ends with an unconfirmed outcome; Refresh makes a new read-only status query.
@@ -256,7 +273,7 @@ including account details.
   needed when the screen specifically requests sign-in or verification.
 - **Repeated "Successful Login" alerts from ADT:** automatic recovery creates
   a new website session and can generate a login alert when you use the watch.
-  Update both apps to v0.26 if alerts appear while the watch is unused: earlier
+  Update both apps to v0.26 or later if alerts appear while the watch is unused: older
   versions allowed notification and background Tile checks to trigger login.
   These checks now only read an existing session, including any follow-up query
   caused by a status hint. The phone attempts a

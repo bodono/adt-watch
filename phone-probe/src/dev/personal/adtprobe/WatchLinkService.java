@@ -25,27 +25,36 @@ public final class WatchLinkService extends WearableListenerService {
     /** The listener worker reads ADT before any toggle can acquire a native-action grant. */
     static void receiveToggle(Context context, MessageEvent event) {
         if (context == null || event == null) return;
+        AlarmStateProtocol.Tap tap = null;
+        String source = null;
+        boolean approved = false;
         try {
             if (!AlarmStateProtocol.TOGGLE_PATH.equals(event.getPath())
                     || !WatchProtocol.validNodeId(event.getSourceNodeId())) return;
-            AlarmStateProtocol.Tap tap = AlarmStateProtocol.parseTap(event.getData());
+            source = event.getSourceNodeId();
+            tap = AlarmStateProtocol.parseTap(event.getData());
             if (tap == null) return;
+            RequestDiagnostics.tap(context, tap.action, tap.request);
             RoutineAccess.Snapshot permission = RoutineAccess.snapshot(context);
             if (permission == null) {
                 // Like the SETUP status reply, any node learns that no watch is approved here.
-                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
-                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                ArmExperimentService.declineTap(context, source, tap.action, tap.request,
+                    AlarmStateProtocol.DeclineReason.SETUP_REQUIRED);
                 return;
             }
-            if (!permission.nodeId.equals(event.getSourceNodeId())) return;
+            if (!permission.nodeId.equals(source)) {
+                RequestDiagnostics.declined(context, tap.action, tap.request, AlarmStateProtocol.DeclineReason.WATCH_CHANGED);
+                return;
+            }
+            approved = true;
             // An unlocked phone, a session still closing or open widget setup is declined here on
             // the worker, without an ADT read. Forwarding such a tap instead would let the main
             // thread create readiness from the cached state if the phone locked in the meantime.
             // A phone-prepared diagnostic session waiting for this very tap is the exception: it
             // gets the tap's own read below and adopts the tap only if that read still matches.
-            if (ArmExperimentService.cannotStartReadiness(context) && !ArmExperimentService.canAdoptWatchTap(tap.action)) {
-                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
-                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+            AlarmStateProtocol.DeclineReason blocker = ArmExperimentService.readinessBlocker(context);
+            if (blocker != null && !ArmExperimentService.canAdoptWatchTap(tap.action)) {
+                ArmExperimentService.declineTap(context, source, tap.action, tap.request, blocker);
                 return;
             }
             // A command's preflight is its own read, never the passive three-second reuse: a read
@@ -53,15 +62,23 @@ public final class WatchLinkService extends WearableListenerService {
             // checks must see. Only a read that began after the tap arrived is shared. A tap whose
             // read did not complete (lock wait over, read failed) is declined; the display keeps
             // whatever observation it had.
-            PhoneAlarmState.Snapshot state = PhoneAlarmState.refresh(context, 0, AlarmStateProtocol.QueryIntent.USER);
+            PhoneAlarmState.Snapshot state = PhoneAlarmState.refresh(context, 0,
+                AlarmStateProtocol.QueryIntent.USER, tap.action, tap.request);
             if (!state.verified) {
-                ArmExperimentService.declineTap(context, event.getSourceNodeId(), tap.action, tap.request,
-                    AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                ArmExperimentService.declineTap(context, source, tap.action, tap.request,
+                    state.refreshFailure != null ? state.refreshFailure : AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED);
                 PhoneStateLink.publish(context);
                 return;
             }
             // receive rechecks setup after the network read and again immediately before activation.
             ArmExperimentService.receive(context, event);
-        } catch (RuntimeException ignored) { /* No native grant exists if preflight cannot finish. */ }
+        } catch (RuntimeException ignored) {
+            // Never log exception text or turn a failed preflight into a command.
+            if (tap != null) {
+                if (approved) ArmExperimentService.declineTap(context, source, tap.action, tap.request,
+                    AlarmStateProtocol.DeclineReason.INTERNAL_ERROR);
+                else RequestDiagnostics.declined(context, tap.action, tap.request, AlarmStateProtocol.DeclineReason.INTERNAL_ERROR);
+            }
+        }
     }
 }

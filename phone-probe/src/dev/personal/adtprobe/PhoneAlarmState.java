@@ -70,8 +70,14 @@ final class PhoneAlarmState {
         final boolean verified;
         /** The most recent read did not succeed. Status may still be READY from an earlier fresh read. */
         final boolean readFailed;
+        /** Failure of this refresh invocation only; never inferred from a cached observation. */
+        final AlarmStateProtocol.DeclineReason refreshFailure;
         Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure, boolean verified, boolean readFailed) {
-            this.verified = verified; this.readFailed = readFailed;
+            this(value, failure, verified, readFailed, null);
+        }
+        Snapshot(AdtLiveLedger.Snapshot value, AlarmStateProtocol.Availability failure, boolean verified, boolean readFailed,
+                AlarmStateProtocol.DeclineReason refreshFailure) {
+            this.verified = verified; this.readFailed = readFailed; this.refreshFailure = refreshFailure;
             state = value != null && failure == null ? value.state : AlarmStateProtocol.State.UNKNOWN;
             revision = value == null ? "-" : value.revision;
             observationId = value == null ? "-" : value.observationId;
@@ -86,8 +92,12 @@ final class PhoneAlarmState {
     static synchronized Snapshot snapshot(Context context) { return snapshot(context, false); }
 
     private static synchronized Snapshot snapshot(Context context, boolean verified) {
+        return snapshot(context, verified, null);
+    }
+
+    private static synchronized Snapshot snapshot(Context context, boolean verified, AlarmStateProtocol.DeclineReason refreshFailure) {
         AdtPortalSession.Binding binding = AdtPortalSession.binding(context);
-        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP, false, true);
+        if (binding == null) return new Snapshot(null, AlarmStateProtocol.Availability.SETUP, false, true, refreshFailure);
         SharedPreferences stored = preferences(context);
         AdtLiveLedger.Snapshot value = read(stored, binding).snapshot(SystemClock.elapsedRealtime(), boot(context));
         String status = stored.getString("queryStatus", "UNAVAILABLE");
@@ -103,7 +113,7 @@ final class PhoneAlarmState {
         // not be re-reported as that request's settled result. Commands separately insist on a
         // verified preflight read.
         else if (readFailed && (!value.fresh || !value.settled)) failure = AlarmStateProtocol.Availability.OFFLINE;
-        return new Snapshot(value, failure, verified, readFailed);
+        return new Snapshot(value, failure, verified, readFailed, refreshFailure);
     }
 
     /** Worker-only read that reuses a successful read younger than REUSE_MS. */
@@ -129,18 +139,30 @@ final class PhoneAlarmState {
         return refresh(context, reuseMillis, -1, intent);
     }
 
+    /** A tap preflight carries only its random request token into private diagnostics. */
+    static Snapshot refresh(Context context, long reuseMillis, AlarmStateProtocol.QueryIntent intent, AlarmAction action, String request) {
+        return refresh(context, reuseMillis, -1, intent, action, request);
+    }
+
     private static Snapshot refresh(Context context, long reuseMillis, long notBeforeElapsed, AlarmStateProtocol.QueryIntent intent) {
+        return refresh(context, reuseMillis, notBeforeElapsed, intent, null, null);
+    }
+
+    private static Snapshot refresh(Context context, long reuseMillis, long notBeforeElapsed, AlarmStateProtocol.QueryIntent intent,
+            AlarmAction action, String request) {
         Context app = context.getApplicationContext();
         AdtPortalSession.Binding binding = AdtPortalSession.binding(app);
-        if (binding == null) return snapshot(app);
         long arrived = SystemClock.elapsedRealtime(), deadline = arrived + QUERY_MS;
+        if (binding == null) return refreshFailed(app, intent, action, request, arrived,
+            RequestDiagnostics.QueryOutcome.NO_BINDING, null, AlarmStateProtocol.DeclineReason.SETUP_REQUIRED);
         boolean locked = false;
         try {
             locked = QUERY_LOCK.tryLock(QUERY_MS, TimeUnit.MILLISECONDS);
             // Another caller's read held the lock the whole time. That says nothing about ADT, so
             // do not record a failure that would turn a fresh observation OFFLINE for everyone;
             // this call simply did not get its read, which its unverified snapshot reports.
-            if (!locked) return snapshot(app);
+            if (!locked) return refreshFailed(app, intent, action, request, arrived,
+                RequestDiagnostics.QueryOutcome.LOCK_WAIT, null, AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED);
             synchronized (PhoneAlarmState.class) {
                 SharedPreferences stored = preferences(app);
                 long lastStarted = stored.getLong("lastQueryStarted", -1), now = SystemClock.elapsedRealtime();
@@ -150,7 +172,11 @@ final class PhoneAlarmState {
                 if (binding.id.equals(stored.getString("bindingId", "")) && stored.getInt("lastQueryBoot", -1) == boot(app)
                         && lastReadSucceeded(stored) && (lastStarted >= arrived
                             || lastStarted > notBeforeElapsed && now >= lastStarted && now - lastStarted < allowedReuse))
+                {
+                    RequestDiagnostics.query(app, intent, action, request, SystemClock.elapsedRealtime() - arrived,
+                        RequestDiagnostics.QueryOutcome.REUSED, null, null);
                     return snapshot(app, true);
+                }
             }
             long started = SystemClock.elapsedRealtime();
             int queryBoot = boot(app);
@@ -163,32 +189,56 @@ final class PhoneAlarmState {
                 + " providerBusy=" + (result != null && Boolean.TRUE.equals(result.loading))
                 + " pendingBefore=" + snapshot(app).pending);
             synchronized (PhoneAlarmState.class) {
-                if (!AdtPortalSession.valid(app, binding)) return snapshot(app);
+                if (!AdtPortalSession.valid(app, binding)) return refreshFailed(app, intent, action, request, arrived,
+                    RequestDiagnostics.QueryOutcome.BINDING_CHANGED, null, AlarmStateProtocol.DeclineReason.SETUP_REQUIRED);
                 if (result == null || received >= deadline || received < started || queryBoot != boot(app)) {
-                    failed(app, binding, AdtPortalClient.Status.UNAVAILABLE); return snapshot(app);
+                    failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);
+                    return refreshFailed(app, intent, action, request, arrived,
+                        result == null ? RequestDiagnostics.QueryOutcome.NO_RESULT : RequestDiagnostics.QueryOutcome.TIMEOUT,
+                        result, AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED);
                 }
                 if (result.status != AdtPortalClient.Status.READY && result.status != AdtPortalClient.Status.BUSY) {
                     if (intent == AlarmStateProtocol.QueryIntent.USER && AdtSessionRecovery.authenticationFailure(result))
                         recoveryOperation.attempt(app, binding, result, arrived);
-                    failed(app, binding, result.status); return snapshot(app);
+                    failed(app, binding, result.status);
+                    AlarmStateProtocol.DeclineReason reason = AdtSessionRecovery.authenticationFailure(result)
+                        ? AlarmStateProtocol.DeclineReason.SIGN_IN_REQUIRED
+                        : result.status == AdtPortalClient.Status.UNSUPPORTED || result.status == AdtPortalClient.Status.AMBIGUOUS
+                            ? AlarmStateProtocol.DeclineReason.STATUS_UNAVAILABLE : AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED;
+                    return refreshFailed(app, intent, action, request, arrived, RequestDiagnostics.QueryOutcome.FAILED, result, reason);
                 }
                 AdtLiveLedger ledger = read(preferences(app), binding);
                 if (!ledger.observe(new AdtLiveLedger.Sample(result.state, result.systemId, result.partitionId,
                         started, received, queryBoot, Boolean.TRUE.equals(result.loading)))) {
-                    failed(app, binding, AdtPortalClient.Status.UNSUPPORTED); return snapshot(app);
+                    failed(app, binding, AdtPortalClient.Status.UNSUPPORTED);
+                    return refreshFailed(app, intent, action, request, arrived, RequestDiagnostics.QueryOutcome.UNSUPPORTED_OBSERVATION,
+                        result, AlarmStateProtocol.DeclineReason.STATUS_UNAVAILABLE);
                 }
                 Snapshot recorded = snapshot(app, write(app, binding, ledger, result.status, started, queryBoot));
                 diagnostic("QUERY_STORED availability=" + recorded.availability.name()
                     + " pending=" + recorded.pending + " providerBusy=" + recorded.providerBusy);
-                if (recorded.verified) scheduleKeepAlive(app);
+                if (!recorded.verified) return refreshFailed(app, intent, action, request, arrived,
+                    RequestDiagnostics.QueryOutcome.STORAGE, result, AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED);
+                RequestDiagnostics.query(app, intent, action, request, received - arrived,
+                    RequestDiagnostics.QueryOutcome.READY, result, null);
+                scheduleKeepAlive(app);
                 return recorded;
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt(); failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);
+            return refreshFailed(app, intent, action, request, arrived, RequestDiagnostics.QueryOutcome.INTERRUPTED,
+                null, AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED);
         } catch (RuntimeException error) {
             failed(app, binding, AdtPortalClient.Status.UNAVAILABLE);
+            return refreshFailed(app, intent, action, request, arrived, RequestDiagnostics.QueryOutcome.EXCEPTION,
+                null, AlarmStateProtocol.DeclineReason.STATUS_CHECK_FAILED);
         } finally { if (locked) QUERY_LOCK.unlock(); }
-        return snapshot(app);
+    }
+
+    private static Snapshot refreshFailed(Context app, AlarmStateProtocol.QueryIntent intent, AlarmAction action, String request,
+            long arrived, RequestDiagnostics.QueryOutcome outcome, AdtPortalClient.Result result, AlarmStateProtocol.DeclineReason reason) {
+        RequestDiagnostics.query(app, intent, action, request, SystemClock.elapsedRealtime() - arrived, outcome, result, reason);
+        return snapshot(app, false, reason);
     }
 
     static synchronized boolean matches(Context context, String revision, AlarmAction action) {

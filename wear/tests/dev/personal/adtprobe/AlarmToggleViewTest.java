@@ -162,6 +162,55 @@ public final class AlarmToggleViewTest {
         assertTrue("The refresh control remains reachable", refresh.top >= 0 && refresh.bottom <= view.getHeight());
     }
 
+    @Test public void refusalWrapsSeparatelyFromCurrentStatusAndDoesNotAuthorizeAnAction() throws IOException {
+        String refusal = "Not sent. Final phone check failed. Try again.";
+        view.render("State unknown", null, false, "Sign in via ADT Watch Setup on phone", refusal);
+        layout();
+        assertEquals(View.VISIBLE, view.noticeView.getVisibility());
+        assertEquals(refusal, view.noticeView.getText().toString());
+        assertFalse(view.alarmButton.getText().toString().contains("Not sent"));
+        assertTrue(view.alarmButton.getText().toString().contains("ADT Watch Setup"));
+        assertTextFits(view.noticeView);
+        assertTextFits(view.alarmButton);
+        Rect explanation = bounds(view.noticeView);
+        for (int x : new int[] {explanation.left, explanation.right})
+            for (int y : new int[] {explanation.top, explanation.bottom})
+                assertTrue("The refusal is immediately readable on the round watch", Math.hypot(x - 120, y - 120) <= 120.5);
+        assertTrue(calls.isEmpty());
+        export("toggle-refusal");
+
+        Configuration config = new Configuration(activity.getResources().getConfiguration());
+        config.fontScale = 2f;
+        mount(activity.createConfigurationContext(config));
+        view.render("State unknown", null, false, "Sign in via ADT Watch Setup on phone", refusal);
+        layout();
+        assertTextFits(view.noticeView);
+        assertTextFits(view.alarmButton);
+        assertTrue(view.canScrollVertically(1));
+        view.scrollTo(0, view.content.getHeight());
+        Rect refresh = bounds(view.refreshButton);
+        assertTrue("The refresh remains reachable below the full explanation", refresh.top >= 0 && refresh.bottom <= view.getHeight());
+        assertTrue(calls.isEmpty());
+        view.render("Disarmed", AlarmAction.ARM_STAY, true, "ADT checked 23:00");
+        assertEquals(View.GONE, view.noticeView.getVisibility());
+    }
+
+    @Test public void aNewRefusalCannotMoveTheButtonUnderAnExistingFingerAndSendAnAction() {
+        view.render("Disarmed", AlarmAction.ARM_STAY, true, "ADT checked 23:00");
+        layout();
+        Rect target = bounds(view.alarmButton);
+        long down = SystemClock.uptimeMillis();
+        dispatch(MotionEvent.ACTION_DOWN, target, down);
+        view.render("Disarmed", AlarmAction.ARM_STAY, true, "ADT checked 23:00",
+            "Not sent. ADT control refreshed. Try again.");
+        layout();
+        dispatch(MotionEvent.ACTION_UP, target, down);
+        idle();
+        assertTrue("Moving the layout consumes any pending gesture", calls.isEmpty());
+        tap(view.alarmButton);
+        assertEquals(Arrays.asList(AlarmAction.ARM_STAY), calls);
+    }
+
     private void assertState(String state, AlarmAction action, String detail, int color, String label) {
         view.render(state, action, true, detail);
         layout();

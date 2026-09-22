@@ -308,7 +308,7 @@ public final class WatchStatusRecoveryTest {
     @Test public void terminalSetupProblemStopsRetriesButKeepsItsActionableExplanation() {
         refresh(); connect(0);
         assertTrue(answer(0, AlarmStateProtocol.Availability.NO_ACCESS, AlarmStateProtocol.State.UNKNOWN, "-", 0));
-        assertEquals("Sign in to ADT on your phone", WatchAlarmStore.read(context).detail);
+        assertEquals("Sign in via ADT Watch Setup on phone", WatchAlarmStore.read(context).detail);
         advance(30_000);
         assertEquals(1, transport.discoveries.size());
         assertFalse(WatchAlarmStore.read(context).enabled);

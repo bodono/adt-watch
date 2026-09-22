@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import dev.personal.adtprobe.AlarmStateProtocol.DeclineReason;
 
 /** Bounded widget requests. Only configuration persists; every activation needs a fresh watch confirmation. */
 public final class ArmExperimentService extends Service {
@@ -79,6 +80,7 @@ public final class ArmExperimentService extends Service {
     private boolean prepareInFlight;
     private boolean commitInFlight;
     private boolean resultRecorded;
+    private boolean nativeClickMayRun;
     private boolean armLease;
     private boolean passiveReadyLocked;
     private Boolean lastReady;
@@ -91,7 +93,7 @@ public final class ArmExperimentService extends Service {
         if (stopped) return;
         if (finishing && SystemClock.elapsedRealtime() >= resultUntil) { stopNow(null); return; }
         try { command.run(); }
-        catch (RuntimeException error) { stopNow("Experiment callback failed. No authorization remains; alarm state is unverified."); }
+        catch (RuntimeException error) { stopNow("Experiment callback failed. No authorization remains; alarm state is unverified.", DeclineReason.INTERNAL_ERROR); }
     }
 
     /** Called only by the visible Activity's deliberate button/positive confirmation. */
@@ -156,9 +158,12 @@ public final class ArmExperimentService extends Service {
         }
         StartGrant queued = pending;
         pending = null;
-        if (queued != null) queued.close();
+        if (queued != null) {
+            queued.close();
+            declineQueued(queued, DeclineReason.ACCESS_CHANGED);
+        }
         ArmExperimentService current = active;
-        if (current != null) current.stopNow("Experiment canceled by phone navigation. No further request is authorized.");
+        if (current != null) current.stopNow("Experiment canceled by phone navigation. No further request is authorized.", DeclineReason.ACCESS_CHANGED);
         else if (queued != null) writeStatus(context, "Experiment preparation canceled. No authorization remains.");
         context.stopService(new Intent(context, ArmExperimentService.class));
     }
@@ -210,12 +215,12 @@ public final class ArmExperimentService extends Service {
                     // A phone-prepared diagnostic session takes the watch's single tap as its
                     // confirmation; a routine session never adopts a second, unrelated toggle.
                     if (current.adoptWatchTap(source, message, toggleRevision)) return;
-                    declineApproved(app, source, message, AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+                    declineApproved(app, source, message, DeclineReason.PHONE_BUSY);
                     return;
                 }
                 try { current.handle(source, message); }
                 catch (RuntimeException error) {
-                    current.stopNow("Experiment message handling failed. No authorization remains; alarm state is unverified.");
+                    current.stopNow("Experiment message handling failed. No authorization remains; alarm state is unverified.", DeclineReason.INTERNAL_ERROR);
                 }
             } else if (app != null && message.kind == ArmExperimentProtocol.Kind.PREPARE) {
                 startRoutineReadiness(app, source, message, toggleRevision);
@@ -232,9 +237,17 @@ public final class ArmExperimentService extends Service {
         requireMain();
         if (message.kind != ArmExperimentProtocol.Kind.PREPARE) return;
         RoutineAccess.Snapshot permission = RoutineAccess.snapshot(app);
-        if (permission == null || !permission.nodeId.equals(source)) return;
-        if (isRunning() || !phoneLocked(app) || WidgetSetupActivity.hasListeningHost()) {
-            if (toggleRevision != null) sendDeclined(app, source, message, AlarmStateProtocol.DeclineReason.UNAVAILABLE);
+        if (permission == null) {
+            if (toggleRevision != null) sendDeclined(app, source, message, DeclineReason.SETUP_REQUIRED);
+            return;
+        }
+        if (!permission.nodeId.equals(source)) {
+            RequestDiagnostics.declined(app, message.action, message.requestId, DeclineReason.WATCH_CHANGED);
+            return;
+        }
+        DeclineReason blocker = readinessBlocker(app);
+        if (blocker != null) {
+            if (toggleRevision != null) sendDeclined(app, source, message, blocker);
             return;
         }
         if (toggleRevision != null) {
@@ -243,12 +256,11 @@ public final class ArmExperimentService extends Service {
             // A still-fresh observation is enough to colour the watch but not to click ADT's
             // scene: the most recent read must itself have succeeded.
             if (state.readFailed || state.availability != AlarmStateProtocol.Availability.READY)
-                reason = AlarmStateProtocol.DeclineReason.UNAVAILABLE;
+                reason = stateBlocker(state);
             else if (message.action == AlarmAction.DISARM && state.state == AlarmStateProtocol.State.DISARMED
                     || message.action == AlarmAction.ARM_STAY && state.state == AlarmStateProtocol.State.ARMED_STAY)
                 reason = AlarmStateProtocol.DeclineReason.ALREADY_SATISFIED;
-            else if (!PhoneAlarmState.matches(app, toggleRevision, message.action))
-                reason = AlarmStateProtocol.DeclineReason.STATE_CHANGED;
+            else reason = stateMismatch(app, toggleRevision, message.action);
             if (reason != null) {
                 sendDeclined(app, source, message, reason);
                 PhoneStateLink.publish(app); return;
@@ -262,6 +274,7 @@ public final class ArmExperimentService extends Service {
             if (pending == next) {
                 pending = null; next.close();
                 writeStatus(app, "Watch readiness start expired. No alarm request was sent.");
+                sendDeclined(app, source, message, DeclineReason.REQUEST_EXPIRED);
             }
         }, START_GRANT_MS + 1);
         try {
@@ -272,6 +285,7 @@ public final class ArmExperimentService extends Service {
             next.close();
             writeStatus(app, "Android could not start watch readiness. No alarm request was sent.");
             Probe.event(app, "Routine readiness startup unavailable; no retry.");
+            sendDeclined(app, source, message, DeclineReason.START_FAILED);
         }
     }
 
@@ -290,6 +304,7 @@ public final class ArmExperimentService extends Service {
     /** Tells the watch at once that its tap cannot be served, instead of leaving it to its deadline. */
     static void declineTap(Context app, String source, AlarmAction action, String request,
             AlarmStateProtocol.DeclineReason reason) {
+        RequestDiagnostics.declined(app, action, request, reason);
         try {
             responder.send(app, source, AlarmStateProtocol.DECLINED_PATH,
                     new AlarmStateProtocol.Declined(action, request, reason).encode());
@@ -298,7 +313,34 @@ public final class ArmExperimentService extends Service {
 
     /** The cheap conditions under which a tap is declined anyway, so no ADT read need precede it. */
     static boolean cannotStartReadiness(Context context) {
-        return isRunning() || !phoneLocked(context) || WidgetSetupActivity.hasListeningHost();
+        return readinessBlocker(context) != null;
+    }
+
+    static DeclineReason readinessBlocker(Context context) {
+        if (isRunning()) return DeclineReason.PHONE_BUSY;
+        if (!phoneLocked(context)) return DeclineReason.PHONE_UNLOCKED;
+        if (WidgetSetupActivity.hasListeningHost()) return DeclineReason.SETUP_OPEN;
+        return null;
+    }
+
+    private static DeclineReason stateBlocker(PhoneAlarmState.Snapshot state) {
+        if (state.refreshFailure != null) return state.refreshFailure;
+        if (state.availability == AlarmStateProtocol.Availability.NO_ACCESS) return DeclineReason.SIGN_IN_REQUIRED;
+        if (state.availability == AlarmStateProtocol.Availability.SETUP) return DeclineReason.SETUP_REQUIRED;
+        if (state.readFailed) return DeclineReason.STATUS_CHECK_FAILED;
+        if (state.pending || state.providerBusy || state.availability == AlarmStateProtocol.Availability.BUSY)
+            return DeclineReason.ALARM_BUSY;
+        return DeclineReason.STATUS_UNAVAILABLE;
+    }
+
+    private static DeclineReason stateMismatch(Context context, String revision, AlarmAction action) {
+        // Keep the original gate and its diagnostic snapshot together: a concurrent status read
+        // must not turn an authentication failure into a misleading changed-state explanation.
+        synchronized (PhoneAlarmState.class) {
+            if (PhoneAlarmState.matches(context, revision, action)) return null;
+            PhoneAlarmState.Snapshot state = PhoneAlarmState.snapshot(context);
+            return state.availability == AlarmStateProtocol.Availability.READY ? DeclineReason.STATE_CHANGED : stateBlocker(state);
+        }
     }
 
     /**
@@ -326,16 +368,16 @@ public final class ArmExperimentService extends Service {
             else startForeground(NOTICE, notice());
             foreground = true;
         } catch (RuntimeException error) {
-            discardPending();
-            stopNow("Experiment could not enter foreground execution. No authorization remains.");
+            discardPending(DeclineReason.START_FAILED);
+            stopNow("Experiment could not enter foreground execution. No authorization remains.", DeclineReason.START_FAILED);
         }
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (stopped) return START_NOT_STICKY;
         if (started) {
-            discardPending();
-            stopNow("Experiment canceled: duplicate service start was rejected.");
+            discardPending(DeclineReason.PHONE_BUSY);
+            stopNow("Experiment canceled: duplicate service start was rejected.", DeclineReason.PHONE_BUSY);
             return START_NOT_STICKY;
         }
         started = true;
@@ -344,14 +386,18 @@ public final class ArmExperimentService extends Service {
         if (intent == null || (flags & (START_FLAG_RETRY | START_FLAG_REDELIVERY)) != 0
                 || grant == null || SystemClock.elapsedRealtime() > grant.until
                 || WidgetSetupActivity.hasListeningHost()) {
-            stopNow("Experiment rejected: no fresh preparation or widget setup still owns the host.");
+            stopNow("Experiment rejected: no fresh preparation or widget setup still owns the host.", DeclineReason.START_FAILED);
             return START_NOT_STICKY;
         }
         action = grant.action;
-        if (grant.routine != null && (!RoutineAccess.stillValid(this, grant.routine) || !phoneLocked(this)
-                || grant.toggleRevision != null && !PhoneAlarmState.matches(this, grant.toggleRevision, action))) {
-            stopNow("Watch readiness rejected: setup or phone lock changed before startup.");
-            return START_NOT_STICKY;
+        if (grant.routine != null) {
+            DeclineReason blocker = !RoutineAccess.stillValid(this, grant.routine) ? DeclineReason.ACCESS_CHANGED
+                : !phoneLocked(this) ? DeclineReason.PHONE_UNLOCKED
+                : grant.toggleRevision != null ? stateMismatch(this, grant.toggleRevision, action) : null;
+            if (blocker != null) {
+                stopNow("Watch readiness rejected: setup or phone lock changed before startup.", blocker);
+                return START_NOT_STICKY;
+            }
         }
         armLease = authorised = grant.authorised;
         sessionUntil = SystemClock.elapsedRealtime() + (grant.routine != null ? ROUTINE_MS
@@ -370,7 +416,7 @@ public final class ArmExperimentService extends Service {
             handler.post(tick);
             if (authorised) discoverNode();
         } catch (RuntimeException error) {
-            stopNow("Experiment rejected: background widget host could not start.");
+            stopNow("Experiment rejected: background widget host could not start.", DeclineReason.WIDGET_NOT_READY);
         }
         return START_NOT_STICKY;
     }
@@ -380,11 +426,11 @@ public final class ArmExperimentService extends Service {
             nodeSource.connectedNodes(this, mainExecutor, nodes -> {
                 if (!live()) return;
                 if (nodes == null || nodes.size() != 1 || !validNode(nodes.get(0).getId())) {
-                    stopNow("Experiment rejected: exactly one connected watch is required.");
+                    stopNow("Experiment rejected: exactly one connected watch is required.", DeclineReason.WATCH_CHANGED);
                     return;
                 }
                 if (grant.routine != null && !grant.routine.nodeId.equals(nodes.get(0).getId())) {
-                    stopNow("Watch readiness rejected: connected watch differs from setup.");
+                    stopNow("Watch readiness rejected: connected watch differs from setup.", DeclineReason.WATCH_CHANGED);
                     return;
                 }
                 boundNode = nodes.get(0).getId();
@@ -392,7 +438,7 @@ public final class ArmExperimentService extends Service {
                 refreshStatus();
             });
         } catch (RuntimeException error) {
-            stopNow("Experiment rejected: connected watch discovery failed.");
+            stopNow("Experiment rejected: connected watch discovery failed.", DeclineReason.WATCH_CHANGED);
         }
     }
 
@@ -402,11 +448,12 @@ public final class ArmExperimentService extends Service {
         if (now >= sessionUntil) {
             stopNow(armLease ? "Experiment expired. No further widget request is authorized."
                 : passiveReadyLocked ? "Passive check ended: the widget was ready while the phone was locked. This check did not activate a scene."
-                : "Passive check ended without confirmed locked-phone readiness. This check did not activate a scene.");
+                : "Passive check ended without confirmed locked-phone readiness. This check did not activate a scene.",
+                DeclineReason.REQUEST_EXPIRED);
             return false;
         }
         if (WidgetSetupActivity.hasListeningHost()) {
-            stopNow("Experiment canceled: widget setup took ownership of the host.");
+            stopNow("Experiment canceled: widget setup took ownership of the host.", DeclineReason.SETUP_OPEN);
             return false;
         }
         // Setup and reported-state validation cost dozens of binder calls, and the 250ms tick
@@ -415,14 +462,16 @@ public final class ArmExperimentService extends Service {
         if (validatedAt >= 0 && now >= validatedAt && now - validatedAt < VALIDATION_INTERVAL_MS) return true;
         validatedAt = now;
         if (grant != null && grant.routine != null && !RoutineAccess.stillValid(this, grant.routine)) {
-            stopNow("Watch request canceled: access or widget setup changed.");
+            stopNow("Watch request canceled: access or widget setup changed.", DeclineReason.ACCESS_CHANGED);
             return false;
         }
-        if (grant != null && grant.toggleRevision != null
-                && !PhoneAlarmState.matches(this, grant.toggleRevision, action)) {
-            PhoneStateLink.publish(this);
-            stopNow("Watch request canceled: ADT's reported state changed or became unavailable.");
-            return false;
+        if (grant != null && grant.toggleRevision != null) {
+            DeclineReason mismatch = stateMismatch(this, grant.toggleRevision, action);
+            if (mismatch != null) {
+                PhoneStateLink.publish(this);
+                stopNow("Watch request canceled: ADT's reported state changed or became unavailable.", mismatch);
+                return false;
+            }
         }
         return true;
     }
@@ -449,19 +498,19 @@ public final class ArmExperimentService extends Service {
                     lastReady = readySnapshot; lastLocked = locked;
                 }
                 if (challengeIssued && !locked) {
-                    rejectChallenge("Arm experiment rejected: phone no longer fully locked after the challenge.");
+                    rejectChallenge("Arm experiment rejected: phone no longer fully locked after the challenge.", DeclineReason.PHONE_UNLOCKED);
                     return;
                 }
                 if (challengeIssued && !readySnapshot) {
-                    rejectChallenge("Arm experiment rejected: widget no longer verified idle after the challenge.");
+                    rejectChallenge("Arm experiment rejected: widget no longer verified idle after the challenge.", DeclineReason.WIDGET_NOT_READY);
                     return;
                 }
                 if (challengeIssued && host.renderGeneration() != challengeGeneration) {
-                    rejectChallenge("Arm experiment rejected: widget render changed after the challenge.");
+                    rejectChallenge("Arm experiment rejected: widget render changed after the challenge.", DeclineReason.WIDGET_CHANGED);
                     return;
                 }
                 if (challengeIssued && SystemClock.elapsedRealtime() >= challengeUntil) {
-                    rejectChallenge("Arm experiment challenge expired; no further request is authorized.");
+                    rejectChallenge("Arm experiment challenge expired; no further request is authorized.", DeclineReason.REQUEST_EXPIRED);
                     return;
                 }
                 advancePrepare(readySnapshot);
@@ -469,7 +518,7 @@ public final class ArmExperimentService extends Service {
                 refreshStatus();
                 handler.postDelayed(this, 250);
             } catch (RuntimeException error) {
-                stopNow("Experiment rejected: widget readiness could not be verified.");
+                stopNow("Experiment rejected: widget readiness could not be verified.", DeclineReason.WIDGET_NOT_READY);
             }
         }
     };
@@ -517,8 +566,9 @@ public final class ArmExperimentService extends Service {
         if (!live() || !authorised || grant == null || grant.routine != null || grant.toggleRevision != null
                 || message.action != action || readinessWait.hasRequest() || challengeIssued || commitInFlight
                 || boundNode != null && !boundNode.equals(source)) return false;
-        if (!PhoneAlarmState.matches(this, revision, action)) {
-            sendDeclined(this, source, message, AlarmStateProtocol.DeclineReason.STATE_CHANGED);
+        DeclineReason mismatch = stateMismatch(this, revision, action);
+        if (mismatch != null) {
+            sendDeclined(this, source, message, mismatch);
             PhoneStateLink.publish(this);
             return true;
         }
@@ -535,18 +585,18 @@ public final class ArmExperimentService extends Service {
         if (!readinessWait.hasRequest()) return;
         if (!live() || !authorised) { readinessWait.clear(); return; }
         if (!readinessWait.isFresh(SystemClock.elapsedRealtime())) {
-            stopNow("Experiment readiness wait expired. No alarm request was sent.");
+            stopNow("Experiment readiness wait expired. No alarm request was sent.", DeclineReason.REQUEST_EXPIRED);
             return;
         }
         if (boundNode != null && !readinessWait.matchesNode(boundNode)) {
-            stopNow("Experiment rejected: readiness source did not match the selected watch.");
+            stopNow("Experiment rejected: readiness source did not match the selected watch.", DeclineReason.WATCH_CHANGED);
             return;
         }
         if (challengeIssued || commitInFlight) return;
         if (!readinessWait.canProceed(boundNode, widgetReady,
                 host == null ? -1 : host.renderGeneration(), fullyLocked(), SystemClock.elapsedRealtime())) {
             if (!readinessWait.hasRequest())
-                stopNow("Experiment readiness wait expired. No alarm request was sent.");
+                stopNow("Experiment readiness wait expired. No alarm request was sent.", DeclineReason.REQUEST_EXPIRED);
             return;
         }
         if (prepareInFlight) return;
@@ -564,15 +614,15 @@ public final class ArmExperimentService extends Service {
                 if (!live()) return;
                 if (nodes == null || nodes.size() != 1 || !source.equals(nodes.get(0).getId())
                         || !source.equals(boundNode)) {
-                    if (challengeIssued) rejectChallenge("Arm experiment rejected: connected watch changed.");
-                    else stopNow("Experiment rejected: connected watch could not be reverified.");
+                    if (challengeIssued) rejectChallenge("Arm experiment rejected: connected watch changed.", DeclineReason.WATCH_CHANGED);
+                    else stopNow("Experiment rejected: connected watch could not be reverified.", DeclineReason.WATCH_CHANGED);
                     return;
                 }
                 continuation.run();
             });
         } catch (RuntimeException error) {
-            if (challengeIssued) rejectChallenge("Arm experiment rejected: watch verification failed.");
-            else stopNow("Experiment rejected: watch verification failed.");
+            if (challengeIssued) rejectChallenge("Arm experiment rejected: watch verification failed.", DeclineReason.WATCH_CHANGED);
+            else stopNow("Experiment rejected: watch verification failed.", DeclineReason.WATCH_CHANGED);
         }
     }
 
@@ -580,23 +630,23 @@ public final class ArmExperimentService extends Service {
         prepareInFlight = false;
         if (!live() || !authorised || challengeIssued) return;
         if (!readinessWait.isFresh(SystemClock.elapsedRealtime())) {
-            stopNow("Experiment readiness wait expired. No alarm request was sent.");
+            stopNow("Experiment readiness wait expired. No alarm request was sent.", DeclineReason.REQUEST_EXPIRED);
             return;
         }
         if (!source.equals(boundNode) || !readinessWait.matchesNode(source)
                 || !request.equals(readinessWait.requestId())) {
-            stopNow("Experiment rejected: readiness request changed.");
+            stopNow("Experiment rejected: readiness request changed.", DeclineReason.ACCESS_CHANGED);
             return;
         }
         if (!readinessWait.canProceed(boundNode, host != null && host.isReady(),
                 host == null ? -1 : host.renderGeneration(), fullyLocked(), SystemClock.elapsedRealtime())) {
             if (!readinessWait.hasRequest())
-                stopNow("Experiment readiness wait expired. No alarm request was sent.");
+                stopNow("Experiment readiness wait expired. No alarm request was sent.", DeclineReason.REQUEST_EXPIRED);
             return;
         }
         // Widget verification can cross the deadline; a late node callback never creates a challenge.
         if (!readinessWait.isFresh(SystemClock.elapsedRealtime())) {
-            stopNow("Experiment readiness wait expired. No alarm request was sent.");
+            stopNow("Experiment readiness wait expired. No alarm request was sent.", DeclineReason.REQUEST_EXPIRED);
             return;
         }
         readinessWait.clear();
@@ -613,22 +663,21 @@ public final class ArmExperimentService extends Service {
                 ArmExperimentProtocol.encodeChallenge(action, requestId, challengeId))
                 .addOnCompleteListener(mainExecutor, task -> {
                     if (!live() || commitInFlight) return;
-                    if (!task.isSuccessful()) stopNow("Experiment stopped: watch challenge submission failed.");
+                    if (!task.isSuccessful()) stopNow("Experiment stopped: watch challenge submission failed.", DeclineReason.WATCH_CHANGED);
                 });
         } catch (RuntimeException error) {
-            stopNow("Experiment stopped: watch challenge could not be submitted.");
+            stopNow("Experiment stopped: watch challenge could not be submitted.", DeclineReason.WATCH_CHANGED);
         }
     }
 
     private void commit(String source, ArmExperimentProtocol.Message message) {
         if (!live()) return;
         boolean requested = false;
+        DeclineReason[] refusal = {DeclineReason.WIDGET_NOT_READY};
         try {
-            if (!authorised || message.action != action || !challengeIssued || !source.equals(boundNode)
-                    || !message.requestId.equals(requestId) || !message.challengeId.equals(challengeId)
-                    || SystemClock.elapsedRealtime() >= challengeUntil || !fullyLocked()
-                    || host == null || !host.isReady() || host.renderGeneration() != challengeGeneration) {
-                rejectChallenge("Arm experiment rejected: confirmation conditions were no longer valid.");
+            DeclineReason blocker = confirmationBlocker(source, message);
+            if (blocker != null) {
+                rejectChallenge("Arm experiment rejected: confirmation conditions were no longer valid.", blocker);
                 return;
             }
             // This is the only activation call. Revoke the service permit before foreign UI code.
@@ -642,29 +691,55 @@ public final class ArmExperimentService extends Service {
             Probe.event(this, "Alarm experiment dispatch guards: action=" + action.name() + ", elapsed=" + dispatchElapsed + "ms, wall="
                 + dispatchWall + "ms, keyguardLocked=" + locked + ", deviceLocked=" + deviceLocked
                 + ", preparingActivityVisible=" + visible + ". Authorization consumed before activation.");
-            // Recheck the deadline after logging; delayed work never becomes a queued command.
-            requested = host.activateOnce(challengeGeneration, () ->
-                fullyLocked() && SystemClock.elapsedRealtime() < challengeUntil
-                    && SystemClock.elapsedRealtime() < sessionUntil && !WidgetSetupActivity.hasListeningHost()
-                    && (grant.routine == null || RoutineAccess.stillValid(this, grant.routine))
-                    && (grant.toggleRevision == null || PhoneAlarmState.beginCommand(this, grant.toggleRevision, action, requestId)))
-                == WidgetHostSession.Activation.ATTEMPTED;
+            // Recheck every final guard after logging; delayed work never becomes a queued command.
+            requested = host.activateOnce(challengeGeneration, () -> {
+                refusal[0] = activationBlocker();
+                nativeClickMayRun = refusal[0] == null;
+                return refusal[0] == null;
+            }) == WidgetHostSession.Activation.ATTEMPTED;
         } catch (RuntimeException error) {
+            refusal[0] = DeclineReason.INTERNAL_ERROR;
             Probe.event(this, "Arm experiment activation returned an error; alarm state is unverified.");
         }
-        finishResult(requested ? ArmExperimentProtocol.Outcome.REQUESTED : ArmExperimentProtocol.Outcome.REJECTED);
+        finishResult(requested ? ArmExperimentProtocol.Outcome.REQUESTED : ArmExperimentProtocol.Outcome.REJECTED,
+            requested ? null : refusal[0] == null ? DeclineReason.FINAL_CHECK_FAILED : refusal[0]);
     }
 
-    private void rejectChallenge(String reason) {
+    private DeclineReason confirmationBlocker(String source, ArmExperimentProtocol.Message message) {
+        if (!authorised || message.action != action || !challengeIssued
+                || !message.requestId.equals(requestId) || !message.challengeId.equals(challengeId))
+            return DeclineReason.ACCESS_CHANGED;
+        if (!source.equals(boundNode)) return DeclineReason.WATCH_CHANGED;
+        if (SystemClock.elapsedRealtime() >= challengeUntil) return DeclineReason.REQUEST_EXPIRED;
+        if (!fullyLocked()) return DeclineReason.PHONE_UNLOCKED;
+        if (host == null || !host.isReady()) return DeclineReason.WIDGET_NOT_READY;
+        if (host.renderGeneration() != challengeGeneration) return DeclineReason.WIDGET_CHANGED;
+        return null;
+    }
+
+    private DeclineReason activationBlocker() {
+        if (!fullyLocked()) return DeclineReason.PHONE_UNLOCKED;
+        if (SystemClock.elapsedRealtime() >= challengeUntil || SystemClock.elapsedRealtime() >= sessionUntil)
+            return DeclineReason.REQUEST_EXPIRED;
+        if (WidgetSetupActivity.hasListeningHost()) return DeclineReason.SETUP_OPEN;
+        if (grant.routine != null && !RoutineAccess.stillValid(this, grant.routine)) return DeclineReason.ACCESS_CHANGED;
+        if (grant.toggleRevision != null && !PhoneAlarmState.beginCommand(this, grant.toggleRevision, action, requestId))
+            return DeclineReason.FINAL_CHECK_FAILED;
+        return null;
+    }
+
+    private void rejectChallenge(String reason, DeclineReason refusal) {
         Probe.event(this, reason);
         if (challengeIssued && requestId != null && challengeId != null && boundNode != null)
-            finishResult(ArmExperimentProtocol.Outcome.REJECTED);
-        else stopNow(reason);
+            finishResult(ArmExperimentProtocol.Outcome.REJECTED, refusal);
+        else stopNow(reason, refusal);
     }
 
-    private void finishResult(ArmExperimentProtocol.Outcome outcome) {
+    private void finishResult(ArmExperimentProtocol.Outcome outcome, DeclineReason refusal) {
         if (stopped || finishing) return;
         authorised = false; finishing = true; resultRecorded = true;
+        if (outcome == ArmExperimentProtocol.Outcome.REQUESTED) RequestDiagnostics.requested(this, action, requestId);
+        else RequestDiagnostics.declined(this, action, requestId, refusal);
         readinessWait.clear();
         resultUntil = SystemClock.elapsedRealtime() + RESULT_GRACE_MS;
         handler.removeCallbacksAndMessages(null);
@@ -678,7 +753,7 @@ public final class ArmExperimentService extends Service {
         handler.postDelayed(() -> stopNow(null), RESULT_GRACE_MS);
         try {
             Wearable.getMessageClient(this).sendMessage(boundNode, ArmExperimentProtocol.RESULT_PATH,
-                ArmExperimentProtocol.encodeResult(action, requestId, challengeId, outcome))
+                ArmExperimentProtocol.encodeResult(action, requestId, challengeId, outcome, refusal))
                 .addOnCompleteListener(mainExecutor, task -> {
                     if (stopped) return;
                     Probe.event(this, task.isSuccessful()
@@ -721,9 +796,14 @@ public final class ArmExperimentService extends Service {
             host = null;
         }
     }
-    private void stopNow(String reason) {
+    private void stopNow(String reason) { stopNow(reason, DeclineReason.UNAVAILABLE); }
+
+    private void stopNow(String reason, DeclineReason refusal) {
         if (stopped) return;
         stopped = true; authorised = false;
+        // Reentrant cancellation after the final callback could race an attempted foreign click.
+        // Never tell the watch "not sent" in that case. Only an unattempted request is refused.
+        if (reason != null && !resultRecorded && !nativeClickMayRun) reportStoppedRequest(refusal);
         readinessWait.clear();
         handler.removeCallbacksAndMessages(null);
         closeHost();
@@ -738,12 +818,42 @@ public final class ArmExperimentService extends Service {
         if (active == this) active = null;
         stopSelf();
     }
-    private static void discardPending() {
-        StartGrant queued = pending; pending = null;
-        if (queued != null) queued.close();
+    private void reportStoppedRequest(DeclineReason refusal) {
+        AlarmAction selected = action != null ? action : grant == null ? null : grant.action;
+        String request = requestId != null ? requestId : readinessWait.hasRequest() ? readinessWait.requestId()
+            : grant == null ? null : grant.initialRequest;
+        String source = boundNode != null ? boundNode : readinessWait.hasRequest() ? readinessWait.source()
+            : grant == null || grant.routine == null ? null : grant.routine.nodeId;
+        if (selected == null || !AlarmStateProtocol.uuid(request)) return;
+        if (source != null && !challengeIssued) {
+            declineTap(this, source, selected, request, refusal);
+            return;
+        }
+        RequestDiagnostics.declined(this, selected, request, refusal);
+        if (source == null || !challengeIssued || !AlarmStateProtocol.uuid(challengeId)) return;
+        try {
+            // Post-challenge refusals use the matched result channel, even when shutting down.
+            responder.send(this, source, ArmExperimentProtocol.RESULT_PATH,
+                ArmExperimentProtocol.encodeResult(selected, request, challengeId, ArmExperimentProtocol.Outcome.REJECTED, refusal));
+        } catch (RuntimeException ignored) { /* Expiry still bounds an undelivered result. */ }
     }
 
-    @Override public void onTimeout(int startId) { stopNow("Experiment ended at Android's service timeout. No authorization remains."); }
+    private static void discardPending() { discardPending(DeclineReason.REQUEST_EXPIRED); }
+
+    private static void discardPending(DeclineReason refusal) {
+        StartGrant queued = pending; pending = null;
+        if (queued != null) {
+            queued.close();
+            declineQueued(queued, refusal);
+        }
+    }
+
+    private static void declineQueued(StartGrant queued, DeclineReason refusal) {
+        if (queued.routine != null && AlarmStateProtocol.uuid(queued.initialRequest))
+            declineTap(queued.application, queued.routine.nodeId, queued.action, queued.initialRequest, refusal);
+    }
+
+    @Override public void onTimeout(int startId) { stopNow("Experiment ended at Android's service timeout. No authorization remains.", DeclineReason.REQUEST_EXPIRED); }
     @Override public void onTimeout(int startId, int type) { onTimeout(startId); }
     @Override public void onDestroy() {
         stopNow("Experiment service stopped. No authorization remains; alarm state is unverified.");

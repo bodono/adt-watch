@@ -446,7 +446,7 @@ public final class WatchAlarmStoreTest {
             AlarmStateProtocol.State.UNKNOWN, AlarmStateProtocol.Availability.NO_ACCESS, "-", 0, "-",
             AlarmStateProtocol.Evidence.ADT_QUERY, "-"), now(), BOOT));
         assertEquals("Result unconfirmed", WatchAlarmStore.read(context).label);
-        assertEquals("Sign in to ADT on your phone", WatchAlarmStore.read(context).detail);
+        assertEquals("Sign in via ADT Watch Setup on phone", WatchAlarmStore.read(context).detail);
         assertTrue(stored().getBoolean("awaiting", false));
     }
 

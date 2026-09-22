@@ -3,6 +3,9 @@ package dev.personal.adtprobe;
 import android.content.Context;
 import android.os.SystemClock;
 import android.provider.Settings;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -98,6 +101,17 @@ public final class AdtSessionRecoveryTest {
         return new AdtPortalClient.Result(status, AlarmStateProtocol.State.UNKNOWN, "", "", "", "", 1);
     }
     private long deadline() { return SystemClock.elapsedRealtime() + 20_000; }
+    @Test public void loginDiagnosticsSurviveCompletionWithoutCredentialsOrExtraWork() throws Exception {
+        assertTrue(AdtSessionRecovery.test(app, deadline()).ready);
+        String log = new String(Files.readAllBytes(new File(app.getFilesDir(), RequestDiagnostics.FILE_NAME).toPath()),
+            StandardCharsets.UTF_8);
+        assertTrue(log.contains("stage=RECOVERY_START manual=true code=STARTED"));
+        assertTrue(log.contains("stage=RECOVERY_RESULT manual=true code=READY"));
+        assertFalse(log.contains("inert-user")); assertFalse(log.contains("inert-password"));
+        assertFalse(log.contains("fixture=value")); assertFalse(log.contains(version));
+        assertFalse(log.contains("system-1")); assertFalse(log.contains("partition-1"));
+        assertEquals(1, logins); assertEquals(1, reads); assertTrue(scheduled.isEmpty());
+    }
     /** The production sequence: the read returns its failure, the queued task runs later on the reads worker. */
     private AdtPortalClient.Result recover(AdtPortalClient.Result result) {
         if (!queue(result)) return result;

@@ -123,11 +123,9 @@ public final class WatchActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (AlarmStateProtocol.DECLINED_PATH.equals(event.getPath()) && !commandSent
                 && started.acceptDeclined(event.getData(), event.getSourceNodeId(), now)) {
-            AlarmStateProtocol.Declined declined = AlarmStateProtocol.parseDeclined(event.getData());
             // A decline stays readable until the next tap, refresh or tile launch. Transient feedback
             // was wiped by the status refresh that follows within a second or two.
-            notice = declined != null && declined.reason == AlarmStateProtocol.DeclineReason.ALREADY_SATISFIED
-                    ? "Already in the requested state." : "Not sent: phone status changed or control unavailable.";
+            notice = refusalMessage(started.rejectionReason());
             endAttempt(null, false);
         } else if (ArmExperimentProtocol.CHALLENGE_PATH.equals(event.getPath())
                 && started.acceptChallenge(event.getData(), event.getSourceNodeId(), now)) {
@@ -144,8 +142,33 @@ public final class WatchActivity extends Activity {
         } else if (ArmExperimentProtocol.RESULT_PATH.equals(event.getPath())
                 && started.acceptResult(event.getData(), event.getSourceNodeId(), now)) {
             boolean requested = started.outcome() == ArmExperimentProtocol.Outcome.REQUESTED;
-            if (!requested) notice = "Request declined by the phone. Check ADT.";
+            if (!requested) notice = refusalMessage(started.rejectionReason());
             endAttempt(null, requested);
+        }
+    }
+    private static String refusalMessage(AlarmStateProtocol.DeclineReason reason) {
+        if (reason == null) return "Not sent. Check ADT on your phone.";
+        switch (reason) {
+            case ALREADY_SATISFIED: return "Already in the requested state.";
+            case STATE_CHANGED: return "Not sent. Alarm status changed. Try again.";
+            case PHONE_UNLOCKED: return "Not sent. Lock your phone and try again.";
+            case PHONE_BUSY: return "Not sent. Phone is handling another request.";
+            case SETUP_OPEN: return "Not sent. Close setup on your phone.";
+            case SETUP_REQUIRED: return "Not sent. Finish setup on your phone.";
+            case WATCH_CHANGED: return "Not sent. Watch connection changed. Try again.";
+            case SIGN_IN_REQUIRED: return "Not sent: ADT needed sign-in.";
+            case STATUS_CHECK_FAILED: return "Not sent. ADT status check failed. Try again.";
+            case STATUS_UNAVAILABLE: return "Not sent. ADT status is unavailable.";
+            case ALARM_BUSY: return "Not sent. ADT is handling another request.";
+            case WIDGET_CHANGED: return "Not sent. ADT control refreshed. Try again.";
+            case WIDGET_NOT_READY: return "Not sent. ADT shortcut is not ready. Check phone.";
+            case REQUEST_EXPIRED: return "Not sent. Request timed out. Try again.";
+            case ACCESS_CHANGED: return "Not sent. Watch access changed. Check phone setup.";
+            case START_FAILED: return "Not sent. Phone could not start control. Try again.";
+            case INTERNAL_ERROR: return "Not sent. Phone control failed. Check phone setup.";
+            case FINAL_CHECK_FAILED: return "Not sent. Final phone check failed. Try again.";
+            case UNAVAILABLE: return "Not sent. Phone control is unavailable. Check phone.";
+            default: return "Not sent. Check ADT on your phone.";
         }
     }
     private void send(String node, String path, byte[] payload, Runnable failure) {
@@ -163,12 +186,12 @@ public final class WatchActivity extends Activity {
         if (controls == null) return;
         WatchAlarmStore.ViewState state = WatchAlarmStore.read(this);
         displayedToken = state.revision;
-        // A decline notice outranks the ordinary detail of a usable control, never a current
-        // problem: while the control is unavailable the store's detail says what to do about it.
-        String detail = notice != null && state.enabled ? notice : feedback == null ? state.detail : feedback;
+        // The preceding tap's refusal and the current status are independent. Keeping both
+        // visible preserves the cause while a status refresh fails or sign-in/setup is needed.
+        String detail = feedback == null ? state.detail : feedback;
         if (!watchUnlocked()) detail = "Unlock your watch.";
         controls.render(attempt != null ? "Sending request" : state.label, state.action,
-            interactive() && attempt == null && state.enabled, detail);
+            interactive() && attempt == null && state.enabled, detail, watchUnlocked() ? notice : null);
         if (interactive() && attempt != null) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
