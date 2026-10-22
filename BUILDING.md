@@ -89,6 +89,16 @@ The corresponding Gradle properties are `adtWatchKeystore`,
 `adtWatchStorePassword`, `adtWatchKeyAlias` and `adtWatchKeyPassword`.
 Environment variables avoid placing passwords in Gradle command arguments.
 
+GitHub Actions holds the same key in the repository secrets
+`ADT_WATCH_KEYSTORE_BASE64` (the keystore, base64 without line breaks),
+`ADT_WATCH_STORE_PASSWORD`, `ADT_WATCH_KEY_ALIAS` and `ADT_WATCH_KEY_PASSWORD`,
+and the repository variable `ADT_WATCH_SIGNER_SHA256` holds the installed
+signer's certificate digest. Runs that see those secrets (pushes to `main` and
+pull requests from this repository) decode the key, verify both APKs against
+the digest and upload them as the `signed-apks` workflow artifact, which can be
+installed directly with `adb install -r`. Forks and runs without the secret
+build with the debug key and upload nothing.
+
 For recovery of the original development checkout, the untracked
 `.tools/keys/adt-probe.jks` is recognised automatically if present. Its original
 standard debug credentials are retained. A private historical signing reference,

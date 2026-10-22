@@ -33,8 +33,49 @@ jobs:
           log-accepted-android-sdk-licenses: false
       - name: Install Android SDK packages
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - name: Install the signing key when this context provides one
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ADT_WATCH_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/adt-probe.jks"
+            chmod 600 "$RUNNER_TEMP/adt-probe.jks"
+            echo "ADT_WATCH_KEYSTORE=$RUNNER_TEMP/adt-probe.jks" >> "$GITHUB_ENV"
+            echo "Signing with the repository's key."
+          else
+            echo "No signing key in this context (fork or missing secret); building with the debug key."
+          fi
       - name: Build, test, lint and inspect both APKs
+        env:
+          ADT_WATCH_STORE_PASSWORD: ${{ secrets.ADT_WATCH_STORE_PASSWORD }}
+          ADT_WATCH_KEY_ALIAS: ${{ secrets.ADT_WATCH_KEY_ALIAS }}
+          ADT_WATCH_KEY_PASSWORD: ${{ secrets.ADT_WATCH_KEY_PASSWORD }}
         run: ./phone-probe/build.sh --check
+      - name: Verify both APKs carry the installed signing identity
+        if: ${{ env.ADT_WATCH_KEYSTORE != '' && vars.ADT_WATCH_SIGNER_SHA256 != '' }}
+        env:
+          EXPECTED_SIGNER_SHA256: ${{ vars.ADT_WATCH_SIGNER_SHA256 }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          expected = os.environ['EXPECTED_SIGNER_SHA256'].lower()
+          report = json.load(open('build/artifact-checks.json'))
+          signers = {a.get('name', str(i)): a['signer_sha256'] for i, a in enumerate(report['artifacts'])}
+          wrong = {name: digest for name, digest in signers.items() if digest != expected}
+          if wrong:
+              sys.exit('Signer differs from the installed identity: ' + ', '.join(f'{n}={d[:12]}' for n, d in wrong.items()))
+          print('Both APKs are signed with the installed identity ' + expected[:12] + '...')
+          EOF
+      - name: Save the signed APK pair
+        if: ${{ env.ADT_WATCH_KEYSTORE != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-apks
+          path: |
+            build/phone-probe.apk
+            build/watch-probe.apk
+          if-no-files-found: error
+          retention-days: 30
       - name: Save test and lint reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
