@@ -97,8 +97,10 @@ in-place update. Check live status before repeating that setup.
 Routine watch control requires Android 15 or later and a secure phone screen
 lock. Install and sign into UK **ADT Smart Services** in the same Android user
 profile as the helper. The native widget contract accepts package
-`com.adtuk.adtukalarm` with **versionCode 2307** only. Other versions require a
-compatibility review.
+`com.adtuk.adtukalarm` with **versionCode 2307 or later**; the widget's
+resources and layout are validated at every use, and the **Watch control
+access…** screen names the installed ADT version when the review no longer
+validates.
 
 1. **Review two complete scenes in ADT.** Create or review `WATCH ARM STAY`
    containing only `SYSTEM / ARM STAY`, and `WATCH DISARM` containing only
@@ -287,6 +289,13 @@ including account details.
 - **An old coloured Tile remains visible:** Wear OS may delay the grey fallback.
   An expired tap still cannot bypass token checks or the phone's live preflight.
   A selected Disarm request is never silently turned into Arm Stay.
+- **Watch says "Finish alarm setup on your phone":** the phone's reviewed watch
+  setup no longer validates, so it answers SETUP before reading ADT. Open
+  **Watch control access…** on the phone: it names the installed ADT version and
+  says whether the review is disabled. Causes are an ADT app older than version
+  code 2307, a changed or removed scene widget, a lost watch association, or a
+  removed screen lock. Repeat the affected setup step and **Enable watch
+  controls once…**.
 - **Changing either scene or widget:** first use **Watch control access… →
   Disable watch controls**. Review the complete scenes, reconfigure the affected
   widget and repeat **Enable watch controls once…**. Widget changes invalidate

@@ -404,7 +404,11 @@ public final class WidgetHostSessionTest {
         assertTrue(binding.valid(snapshot, host));
         installed.versionCode = 2308;
         Shadows.shadowOf(context.getPackageManager()).installPackage(installed);
-        assertFalse(binding.valid(snapshot, host));
+        assertTrue("A newer ADT version keeps the reviewed contract until its resources or layout stop validating",
+            binding.valid(snapshot, host));
+        installed.versionCode = 2306;
+        Shadows.shadowOf(context.getPackageManager()).installPackage(installed);
+        assertFalse("An ADT older than the reviewed version is refused", binding.valid(snapshot, host));
         installed.versionCode = 2307;
         Shadows.shadowOf(context.getPackageManager()).installPackage(installed);
         context.getSharedPreferences("widget_host", Context.MODE_PRIVATE).edit().putLong("revision", 6).commit();

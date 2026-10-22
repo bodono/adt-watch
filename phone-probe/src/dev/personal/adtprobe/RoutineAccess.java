@@ -27,6 +27,13 @@ final class RoutineAccess {
     static final String PREFERENCES = "routine_watch_access";
     private static final ComponentName PROVIDER = new ComponentName("com.adtuk.adtukalarm",
         "com.alarm.alarmmobile.android.WidgetProvider");
+    /**
+     * The ADT version whose scene widget this helper was reviewed against. Later versions are
+     * accepted: the widget's resources are resolved by name and its layout is validated before
+     * every click, and an exact pin broke the watch on ADT's first auto-update. Older versions
+     * are refused, since the review says nothing about them.
+     */
+    static final long MINIMUM_ADT_VERSION = 2307;
     private static boolean storageFailed;
 
     private RoutineAccess() { }
@@ -182,8 +189,8 @@ final class RoutineAccess {
                 if (candidate == id) owned = true;
             if (!owned) return null;
             PackageInfo installed = context.getPackageManager().getPackageInfo(PROVIDER.getPackageName(), 0);
-            if (installed.getLongVersionCode() != 2307 || installed.applicationInfo == null || !installed.applicationInfo.enabled)
-                return null;
+            if (installed.getLongVersionCode() < MINIMUM_ADT_VERSION || installed.applicationInfo == null
+                    || !installed.applicationInfo.enabled) return null;
             AppWidgetManager manager = AppWidgetManager.getInstance(context);
             AppWidgetProviderInfo info = manager.getAppWidgetInfo(id);
             if (!allowed(info)) return null;
@@ -204,6 +211,15 @@ final class RoutineAccess {
         return stored.getInt("active", -1) == slot.id && stored.getLong("revision", 0) == slot.revision
             && stored.getInt("pending", -1) <= 0 && stored.getInt("stage", WidgetSetupState.NONE) == WidgetSetupState.NONE
             && stored.getStringSet("owned", Collections.emptySet()).contains(Integer.toString(slot.id));
+    }
+
+    /** The installed ADT app as the setup screen names it, or null when it is not installed. */
+    static String installedAdtVersion(Context context) {
+        try {
+            PackageInfo installed = context.getPackageManager().getPackageInfo(PROVIDER.getPackageName(), 0);
+            String name = safeName(installed.versionName);
+            return (name == null ? "unknown version" : "version " + name) + " (code " + installed.getLongVersionCode() + ")";
+        } catch (Exception ignored) { return null; }
     }
 
     static String safeName(CharSequence raw) {
