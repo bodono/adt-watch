@@ -34,7 +34,8 @@ import java.util.function.BooleanSupplier;
 final class WidgetHostSession implements AutoCloseable {
     private static final ComponentName PROVIDER = new ComponentName("com.adtuk.adtukalarm",
         "com.alarm.alarmmobile.android.WidgetProvider");
-    private static final long REVIEWED_VERSION = 2307;
+    /** The ADT version the widget contract was reviewed against; later versions must still resolve and validate it. */
+    private static final long MINIMUM_VERSION = RoutineAccess.MINIMUM_ADT_VERSION;
     private final Context context;
     private final AlarmAction action;
     private final Binding binding;
@@ -416,7 +417,7 @@ final class WidgetHostSession implements AutoCloseable {
                         || !prefs.getStringSet("owned", Collections.emptySet()).contains(Integer.toString(snapshot.id)))
                     return false;
                 PackageInfo installed = context.getPackageManager().getPackageInfo(PROVIDER.getPackageName(), 0);
-                if (installed.getLongVersionCode() != REVIEWED_VERSION || installed.applicationInfo == null
+                if (installed.getLongVersionCode() < MINIMUM_VERSION || installed.applicationInfo == null
                         || !installed.applicationInfo.enabled) return false;
                 boolean owned = false, available = false;
                 for (int id : host.getAppWidgetIds()) if (id == snapshot.id) owned = true;

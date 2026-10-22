@@ -80,7 +80,8 @@ public final class RoutineSetupActivity extends Activity {
         RoutineAccess.Review review = RoutineAccess.prepareReview(this);
         if (review == null) {
             status.setText("Set a secure phone screen lock and finish both scene widgets first. "
-                + "Routine access also requires Android 15 or later and the reviewed ADT version.");
+                + "Routine access also requires Android 15 or later and ADT Smart Services version code "
+                + RoutineAccess.MINIMUM_ADT_VERSION + " or later." + adtVersionNote());
             return;
         }
         List<RoutineAccess.AssociationChoice> associations = RoutineAccess.associations(this);
@@ -181,8 +182,14 @@ public final class RoutineSetupActivity extends Activity {
         super.onResume(); resumed = true;
         status.setText(Build.VERSION.SDK_INT < 35 ? "Routine access requires Android 15 or later. Manual setup remains available."
             : RoutineAccess.snapshot(this) == null ? "Watch controls are disabled or their reviewed setup is no longer valid."
+                + adtVersionNote()
             : "Watch controls are enabled for the reviewed watch.");
         handler.removeCallbacks(tick); handler.post(tick);
+    }
+    /** Names the installed ADT app, so an incompatible or missing one is diagnosable on the phone. */
+    private String adtVersionNote() {
+        String installed = RoutineAccess.installedAdtVersion(this);
+        return installed == null ? " ADT Smart Services is not installed in this profile." : " Installed ADT: " + installed + ".";
     }
     @Override public void onPause() {
         resumed = false; finishFlow(null); handler.removeCallbacks(tick); super.onPause();

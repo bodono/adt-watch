@@ -103,8 +103,10 @@ Routine use then needs no per-use phone preparation.
 
 Compatibility is deliberately narrow: routine control requires Android 15 or
 later, a secure phone screen lock, Google Play Services and UK ADT Smart Services
-(`com.adtuk.adtukalarm`) **versionCode 2307**. Other native ADT versions need a
-widget-contract review. Multiple website systems or partitions are rejected;
+(`com.adtuk.adtukalarm`) **versionCode 2307 or later**. The scene widget's
+resources are resolved by name and its layout is validated before every click,
+so an ADT update that keeps that contract keeps working and one that changes it
+fails closed; older ADT versions are refused. Multiple website systems or partitions are rejected;
 website response changes may also require an update. The Wear APK has minimum
 Android API 30. Wider device/account compatibility and reliable overnight
 operation still need physical verification. Offline tests do not contact ADT.

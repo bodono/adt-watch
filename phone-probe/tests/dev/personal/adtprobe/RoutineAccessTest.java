@@ -149,7 +149,21 @@ public final class RoutineAccessTest {
         access().edit().putString("node", NODE).commit(); assertNotNull(RoutineAccess.snapshot(context));
         PackageInfo updated = context.getPackageManager().getPackageInfo("com.adtuk.adtukalarm", 0);
         updated.versionCode = 2308; Shadows.shadowOf(context.getPackageManager()).installPackage(updated);
-        assertNull(RoutineAccess.snapshot(context));
+        assertNotNull("A newer ADT version is accepted; the widget contract is validated at every use", RoutineAccess.snapshot(context));
+        updated.versionCode = 2306; Shadows.shadowOf(context.getPackageManager()).installPackage(updated);
+        assertNull("An ADT older than the reviewed version is refused", RoutineAccess.snapshot(context));
+        updated.versionCode = 2307; Shadows.shadowOf(context.getPackageManager()).installPackage(updated);
+        assertNotNull(RoutineAccess.snapshot(context));
+    }
+
+    @Test public void theInstalledAdtVersionIsNamedForTheSetupScreen() throws Exception {
+        PackageInfo installed = context.getPackageManager().getPackageInfo("com.adtuk.adtukalarm", 0);
+        installed.versionName = "5.11.2"; Shadows.shadowOf(context.getPackageManager()).installPackage(installed);
+        assertEquals("version 5.11.2 (code 2307)", RoutineAccess.installedAdtVersion(context));
+        installed.versionName = null; Shadows.shadowOf(context.getPackageManager()).installPackage(installed);
+        assertEquals("unknown version (code 2307)", RoutineAccess.installedAdtVersion(context));
+        Shadows.shadowOf(context.getPackageManager()).removePackage("com.adtuk.adtukalarm");
+        assertNull(RoutineAccess.installedAdtVersion(context));
     }
 
     @Test public void reviewedEnableRequiresVisibleUnlockedPhoneAndUnchangedReview() {
